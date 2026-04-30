@@ -1,0 +1,36 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+#PyTorch
+*.pth
+*.pt
+
+#Data
+*.csv
+*.json
+data/
+
+#Plots
+*.png
+*.jpg 
+
+#IDE 
+.vscode/
+.idea/
+*.swp 
+
+#OS
+.DS_Store
+Thumbs.db 
+
+#files
+howToGitHub.md
+
