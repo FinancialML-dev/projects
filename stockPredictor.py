@@ -22,12 +22,12 @@ from alpaca.data.timeframe import TimeFrame
 CONFIG = {
     "SYMBOL": "BTC/USD",
     "TIMEFRAME": TimeFrame.Minute,          #Intervall in Minutes  
-    "START_DATE": datetime(2026, 3, 1),     #Start date year, month, day --> of minute data 
+    "START_DATE": datetime(2026, 2, 1),     #Start date year, month, day --> of minute data 
     "END_DATE": datetime(2026, 4, 1),       #End date year, month, day --> of minute data
-    "LOOKBACK": 30,                         #Use last 30 candles for prediction 
+    "LOOKBACK": 32,                         #Use last <30> candles for prediction 
     "TRAIN_SPLIT": 0.8,                     #80% training data, 20% test data 
-    "EPOCHS": 100,                          #100 Iterations 
-    "LEARNING_RATE": 0.001,
+    "EPOCHS": 500,                          #<100> Iterations
+    "LEARNING_RATE": 0.001,                 #0.001 
     "BATCH_SIZE": 32
 }
 
@@ -290,7 +290,7 @@ def evaluateModel(_model, _Xtest, _yTest):
     
     with torch.no_grad():
         XtestData = torch.FloatTensor(_Xtest)
-        yTestData = torch.FloatTensor(_yTest).reshape(-1, 1)
+        yTestData = torch.FloatTensor(_yTest).reshape(-1, 1)   #The `-1` means "figure this dimension out yourself." Telling NumPy/PyTorch: "I know I want 1 column — you calculate how many rows are needed."
         
         #Predictions
         predictions = _model(XtestData)
@@ -464,6 +464,7 @@ def main():
     
     #4. Build model 
     print("\nStep 4: Building model...")
+    torch.manual_seed(42) #Remove or comment out, when you want variance across multiple runs (for the `runMultipleTimes(_iterations)` ).
     model = PricePredictor(_inputSize=X.shape[1])
     totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
     print(f"--> Model created with {totalParameters} parameters")
@@ -497,7 +498,9 @@ if __name__ == "__main__":
     main()
       
 
-
+#-----
+#Small manual tests, for each of the function examples and class examples   
+#-----
 '''returns = calculateReturns([100, 105, 98, 110])
 print(returns)'''
 
