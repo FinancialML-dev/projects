@@ -184,7 +184,7 @@ def plotCandleSticks(_time, _open, _high, _low, _close, _title="Candlestick Char
         title=_title,
         xaxis_title="Time",
         yaxis_title="Price (USD)",
-        template="plotly_light",
+        template="plotly_white",
         xaxis_rangeslider_visible=True
     )
     
