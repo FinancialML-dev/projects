@@ -14,22 +14,43 @@ import numpy
 import matplotlib.pyplot as plotLibrary     #uv add matplotlib 
 from datetime import datetime 
 from timebarsRefactoredFull import fetchCryptoData, formatDataToLists 
+from dollarBarsRefactoredFull import fetchCryptoData, formatBarsToDictionaryList, createDollarBars, formatDollarBarsToList
 from alpaca.data.timeframe import TimeFrame 
+
+from sklearn.preprocessing import StandardScaler    #uv add scikit-learn
+import copy 
+import random
 
 #-------------------------------
 #Configuration 
 #-------------------------------
-CONFIG = {
+BASE_CONFIG = {
     "SYMBOL": "BTC/USD",
-    "TIMEFRAME": TimeFrame.Minute,          #Intervall in Minutes  
-    "START_DATE": datetime(2026, 2, 1),     #Start date year, month, day --> of minute data 
-    "END_DATE": datetime(2026, 4, 1),       #End date year, month, day --> of minute data
     "LOOKBACK": 32,                         #Use last <30> candles for prediction 
     "TRAIN_SPLIT": 0.8,                     #80% training data, 20% test data 
-    "EPOCHS": 500,                          #<100> Iterations
+    "EPOCHS": 1000,                          #<100> Iterations
     "LEARNING_RATE": 0.001,                 #0.001 
-    "BATCH_SIZE": 32
+    "BATCH_SIZE": 32,
+    "DOLLAR_THRESHOLD": 500_000,            #$500K per dollar bar
+    "USE_PRICE_RELATIVE_TO_MA": True        #Toggle on/off
 }
+
+TIME_BARS_CONFIG = {
+    "TIMEFRAME": TimeFrame.Minute,          #Intervall in Minutes  
+    "START_DATE": datetime(2026, 4, 1),     #Start date year, month, day --> of minute data 
+    "END_DATE": datetime(2026, 4, 23),      #End date year, month, day --> of minute data
+    "BAR_MODE": "time_bars"
+}
+
+DOLLAR_BARS_CONFIG = {
+    "TIMEFRAME": TimeFrame.Minute,             #Intervall in Days  
+    "START_DATE": datetime(2023, 1, 1),      #Start date year, month, day --> of minutes data 
+    "END_DATE": datetime(2026, 5, 7),       #End date year, month, day --> of minutes data
+    "BAR_MODE": "dollar_bars"
+}
+
+#CONFIG = {**BASE_CONFIG, **TIME_BARS_CONFIG}
+CONFIG = {**BASE_CONFIG, **DOLLAR_BARS_CONFIG}
 
 #-------------------------------
 #Feature Engineering (input features, variables)
@@ -52,9 +73,64 @@ def calculateReturns(_prices):
     """
 
     prices = numpy.array(_prices)
-    returns = (prices[1:] - prices[:-1]) / prices[:-1]      #This calculates the percentage return between consecutive prices.
+    returns = (prices[1:] - prices[:-1]) / prices[:-1]      #This calculates the percentage (% change) return between consecutive prices (close prices).
+
     
     return returns 
+
+
+def calculateRollingVolatility(_returns, _window=14):
+    """ 
+    ...
+    """
+    volatility = numpy.array([
+        numpy.std(_returns[max(0, i - _window):i])
+        if i >= _window else numpy.nan
+        for i in range(1, len(_returns))
+    ])
+    
+    return volatility
+
+
+def calculateRSI(_prices, _window=14):
+    """ 
+    ...
+    """
+    prices = numpy.array(_prices)
+    deltas = numpy.diff(prices)
+    
+    gains = numpy.where(deltas > 0, deltas, 0)
+    losses = numpy.where(deltas < 0, -deltas, 0)
+    
+    averageGain = numpy.convolve(gains, numpy.ones(_window)/_window, mode="full")[:len(gains)]
+    averageLoss = numpy.convolve(losses, numpy.ones(_window)/_window, mode="full")[:len(losses)]
+    
+    #rs = numpy.where(averageLoss == 0, numpy.inf, averageGain/averageLoss)
+    rs = numpy.full_like(averageGain, numpy.inf)    #default: inf (RSI=100)
+    mask = averageLoss != 0
+    rs[mask] = averageGain[mask] / averageLoss[mask]
+    rsi = 100 - (100 / (1 + rs))
+    #When rs = inf --> rsi = 100 - 0 = 100 (correct, fully overbought)
+    
+    #Pad front to match original price length 
+    return numpy.concatenate([numpy.full(_window, numpy.nan), rsi])
+
+
+def calculatePriceRelativeToMA(_prices, _window=20):
+    """ 
+    ...
+    """
+    prices = numpy.array(_prices)
+    ma = numpy.convolve(prices, numpy.ones(_window)/_window, mode="full")[:len(prices)]
+    
+    #First (_window-1) values are based on incomplete windows - set to NaN 
+    ma[:_window - 1] = numpy.nan 
+    
+    #Ratio: how far price is above/below its MA (0.02 = 2% above, -0.03 = 3% below)
+    priceRelativeToMA = (prices - ma)/ma 
+    
+    return priceRelativeToMA 
+
 
 def createFeaturesAndLabels(_closePrices, _lookback=30): 
     """
@@ -81,16 +157,57 @@ def createFeaturesAndLabels(_closePrices, _lookback=30):
         >>> print(features.shape)   # (2, 3)  — 2 windows of 3 returns each
         >>> print(labels)           # [1, 0]  — next move up, then down
     """
-
     returns = calculateReturns(_closePrices)
+    volatility = calculateRollingVolatility(returns, _window=14)
+    rsi = calculateRSI(_closePrices, _window=14)
+    priceRelativeToMA = calculatePriceRelativeToMA(_closePrices, _window=20)
+    
+    #Align all arrays - RSI is based on prices (length N),
+    #returns/volatility are length N-1. Trim RSI to match.
+    #Align to returns/priceRelativeToMA length (N-1)
+    rsi = rsi[1:]   #Drop first element to match returns length
+    priceRelativeToMA = priceRelativeToMA[1:]
+    
+    #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
+    #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
+    #validStartIndex = 20 if CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 14
+    validStartIndex = 14 if not CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 20
+    returns = returns[validStartIndex:]
+    volatility = volatility[validStartIndex:]
+    rsi = rsi[validStartIndex:]
+    priceRelativeToMA = priceRelativeToMA[validStartIndex:]
     
     features = []
     labels = []
     
     for i in range(_lookback, len(returns)):
-        #Features (inputs): returns from [i-_lookback:i-1]  
-        window = returns[i-_lookback:i]
-        features.append(window)
+        #Features (inputs): returns from [i - _lookback:i]  
+        #window = returns[i - _lookback:i]
+        #Return window - shape (_lookback,)
+        returnWindow = returns[i - _lookback:i]
+        
+        #Volatility window - shape(_lookback,)
+        volatilityWindow = volatility[i - _lookback:i]
+        
+        rsiWindow = rsi[i - _lookback:i]
+        
+        priceRelativeToMAWindow = priceRelativeToMA[i - _lookback:i]
+        
+        #Concatenate both into one feature vector - shape (_lookback * 3)
+        #window = numpy.concatenate([returnWindow, volatilityWindow, rsiWindow])
+        #features.append(window)         #Features shape goes from (N, 64) → (N, 96) — 32 returns + 32 volatility + 32 RSI. 
+        #window = numpy.concatenate([returnWindow, volatilityWindow, rsiWindow, priceRelativeToMAWindow]) 
+        #features.append(window)         #Features shape goes from (N, 96) → (N, 128) — 32 returns + 32 volatility + 32 RSI + 32 PriceRelativeToMA. 
+        
+        #Build feature list dynamically
+        featureParts = [returnWindow, volatilityWindow, rsiWindow]  #Features shape goes from (N, 64) → (N, 96) — 32 returns + 32 volatility + 32 RSI. 
+        
+        if CONFIG["USE_PRICE_RELATIVE_TO_MA"]:
+            featureParts.append(priceRelativeToMAWindow)            #Features shape goes from (N, 96) → (N, 128) — 32 returns + 32 volatility + 32 RSI + 32 PriceRelativeToMA. 
+            
+        window = numpy.concatenate(featureParts)
+        
+        features.append(window) 
         
         #Label: 1 if next return positive, 0 if negative 
         nextReturn = returns[i] 
@@ -179,7 +296,7 @@ class PricePredictor(torch.nn.Module):
 #-------------------------------
 #Training: Train the model (our Neural Network)
 #-------------------------------
-def trainModel(_model, _Xtrain, _yTrain, _epochs=100, _learningRate=0.001, _batchSize=32): 
+def trainModel(_model, _Xtrain, _yTrain, _Xtest, _yTest, _epochs=100, _learningRate=0.001, _batchSize=32): 
     """
     Trains the PricePredictor model using binary cross-entropy loss and Adam optimizer.
 
@@ -214,6 +331,8 @@ def trainModel(_model, _Xtrain, _yTrain, _epochs=100, _learningRate=0.001, _batc
     """
     XtrainData = torch.FloatTensor(_Xtrain)
     yTrainData = torch.FloatTensor(_yTrain).reshape(-1, 1) 
+    XtestData = torch.FloatTensor(_Xtest)
+    yTestData = torch.FloatTensor(_yTest).reshape(-1, 1)
     
     optimizer = torch.optim.Adam(_model.parameters(), lr=_learningRate)
     criterion = torch.nn.BCELoss()
@@ -223,6 +342,11 @@ def trainModel(_model, _Xtrain, _yTrain, _epochs=100, _learningRate=0.001, _batc
     print("\n" + "-"*20)
     print("Training...")
     print("-"*20)
+    
+    #Early stopping - stop training when test accuracy stops improving. Than running all fixed epochs/iterations.
+    bestLoss = float("inf")
+    patience = 50           #Stop if no improvement for 50 epochs 
+    noImpove = 0
     
     for item in range(_epochs):
         _model.train()
@@ -248,6 +372,26 @@ def trainModel(_model, _Xtrain, _yTrain, _epochs=100, _learningRate=0.001, _batc
             print(f"    Layer 1: w={_model.neuralNetwork[0].weight.data.shape}, b={_model.neuralNetwork[0].bias.data.shape}") #Our model wraps the Sequential inside `self.neuralNetwork` --> So, For Sequential model we use: model.neuralNetwork[0] the first Linear(x, y) layer. Layer 1 --> shape: x rows, y column 
             print(f"    Layer 2: w={_model.neuralNetwork[3].weight.data.shape}, b={_model.neuralNetwork[3].bias.data.shape}") #model.neuralNetwork[3] the second Linear(x, y) layer. Layer 2 --> shape: x row, y columns  
             print(f"    Layer 3: w={_model.neuralNetwork[6].weight.data.shape}, b={_model.neuralNetwork[6].bias.data.shape}") #model.neuralNetwork[6] the second Linear(x, y) layer. Layer 3 --> shape: x row, y columns  
+    
+            
+        #Evaluate on TEST data for early stopping (Optimizer)  
+        _model.eval()
+        with torch.no_grad():
+            testPredictions = _model(XtestData)
+            testLoss = criterion(testPredictions, yTestData).item()  
+            
+        if testLoss < bestLoss:
+            bestLoss = testLoss
+            noImpove = 0
+            bestModelWeights = copy.deepcopy(_model.state_dict())   #Save best. Only save when improved 
+        else:
+            noImpove += 1
+            if noImpove >= patience:
+                print(f"Early stopping at epoch/iteration {item:3d}")
+                break
+            
+    #Restore the best weights 
+    _model.load_state_dict(bestModelWeights)
     
     print("-"*20 + "\n")
     
@@ -424,6 +568,7 @@ def plotTrainingHistory(_history):
     print("--> Training history plot saved to training-history.png")
     plotLibrary.show()
 
+
 #-------------------------------
 #Main Execution 
 #-------------------------------    
@@ -444,8 +589,13 @@ def main():
         CONFIG["END_DATE"]
     )
     
-    time, openPrice, highPrice, lowPrice, closePrice, volumeUnits = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
-    #_, _, _, _, close, _ = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 2
+    if CONFIG["BAR_MODE"] == "dollar_bars":
+        timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
+        dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
+        time, openPrice, highPrice, lowPrice, closePrice, dollarVolume = formatDollarBarsToList(dollarBars)
+    else:   #CONFIG["BAR_MODE"] == "time_bars" 
+        time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
+        #_, _, _, _, closePrice, _ = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 2
     
     #2. Feature engineering 
     print("\nStep 2: Creating features...")
@@ -459,11 +609,17 @@ def main():
     XtrainData, XtestData, yTrainData, yTestData = trainTestSplit(
         X, y, _trainRatio=CONFIG["TRAIN_SPLIT"] 
     )
+    scaler = StandardScaler()                           #Normalize the features 
+    XtrainData = scaler.fit_transform(XtrainData)       #Fit on train data only 
+    XtestData = scaler.transform(XtestData)             #Apply same scale to test 
     print(f"--> Train samples: {len(XtrainData)}")
     print(f"--> Test samples:  {len(XtestData)}")
     
     #4. Build model 
     print("\nStep 4: Building model...")
+    #One run
+    '''random.seed(42)
+    numpy.random.seed(42)
     torch.manual_seed(42) #Remove or comment out, when you want variance across multiple runs (for the `runMultipleTimes(_iterations)` ).
     model = PricePredictor(_inputSize=X.shape[1])
     totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
@@ -471,14 +627,40 @@ def main():
     
     #5. Train 
     print("\nStep 5: Training model...")
-    history = trainModel(model, XtrainData, yTrainData, 
+    history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
                          _epochs=CONFIG["EPOCHS"], 
                          _learningRate=CONFIG["LEARNING_RATE"])
     
     #6. Evaluate 
     print("\nStep 6: Evaluating the model...")
     metrics = evaluateModel(model, XtestData, yTestData)
-    printEvaluation(metrics)
+    printEvaluation(metrics)'''
+    
+    #multiple runs
+    results = [] 
+    for itemSeed in [42, 43, 44, 45, 46]:
+        random.seed(itemSeed)
+        numpy.random.seed(itemSeed)
+        torch.manual_seed(itemSeed)
+        model = PricePredictor(_inputSize=X.shape[1])
+        totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
+        print(f"--> Model created with {totalParameters} parameters")
+        
+        #5. Train 
+        print("\nStep 5: Training model...")
+        history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
+                            _epochs=CONFIG["EPOCHS"], 
+                            _learningRate=CONFIG["LEARNING_RATE"])
+        
+        #6. Evaluate 
+        print("\nStep 6: Evaluating the model...")
+        metrics = evaluateModel(model, XtestData, yTestData)
+        printEvaluation(metrics)
+        
+        results.append(metrics["accuracy"])     #test accuracy
+        print(f"Seed {itemSeed}: {metrics["accuracy"]:.4f}")
+        
+    print(f"\nMean: {numpy.mean(results):.4f} ± {numpy.std(results):.4f}")
     
     #7. Visualize 
     print("\nStep 7: Generating plots...")
