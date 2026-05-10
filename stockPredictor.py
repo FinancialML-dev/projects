@@ -171,7 +171,10 @@ def createFeaturesAndLabels(_closePrices, _lookback=30):
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
     #validStartIndex = 20 if CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 14
-    validStartIndex = 14 if not CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 20
+    #validStartIndex = 14 if not CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 20
+    nanWindow = 14 if not CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 20 #For the cases when we vary the LOOKBACK to small sizes 
+    validStartIndex = max(nanWindow, CONFIG["LOOKBACK"])
+    
     returns = returns[validStartIndex:]
     volatility = volatility[validStartIndex:]
     rsi = rsi[validStartIndex:]
@@ -367,11 +370,10 @@ def trainModel(_model, _Xtrain, _yTrain, _Xtest, _yTest, _epochs=100, _learningR
         history["accuracy"].append(accuracy.item())
         
         if item % 20 == 0:
-            print(f"Epoch/Iteration {item:3d}: Loss={loss.item():.4f}, Accuracy={accuracy.item():.4f} ")
-            #print(f"Iteration {item:3d}: loss={loss.item():.4f}")  
-            print(f"    Layer 1: w={_model.neuralNetwork[0].weight.data.shape}, b={_model.neuralNetwork[0].bias.data.shape}") #Our model wraps the Sequential inside `self.neuralNetwork` --> So, For Sequential model we use: model.neuralNetwork[0] the first Linear(x, y) layer. Layer 1 --> shape: x rows, y column 
-            print(f"    Layer 2: w={_model.neuralNetwork[3].weight.data.shape}, b={_model.neuralNetwork[3].bias.data.shape}") #model.neuralNetwork[3] the second Linear(x, y) layer. Layer 2 --> shape: x row, y columns  
-            print(f"    Layer 3: w={_model.neuralNetwork[6].weight.data.shape}, b={_model.neuralNetwork[6].bias.data.shape}") #model.neuralNetwork[6] the second Linear(x, y) layer. Layer 3 --> shape: x row, y columns  
+            print(f"Epoch/Iteration {item:3d}: Loss={loss.item():.4f}, Accuracy={accuracy.item():.4f} ") 
+            #print(f"    Layer 1: w={_model.neuralNetwork[0].weight.data.shape}, b={_model.neuralNetwork[0].bias.data.shape}") #Our model wraps the Sequential inside `self.neuralNetwork` --> So, For Sequential model we use: model.neuralNetwork[0] the first Linear(x, y) layer. Layer 1 --> shape: x rows, y column 
+            #print(f"    Layer 2: w={_model.neuralNetwork[3].weight.data.shape}, b={_model.neuralNetwork[3].bias.data.shape}") #model.neuralNetwork[3] the second Linear(x, y) layer. Layer 2 --> shape: x row, y columns  
+            #print(f"    Layer 3: w={_model.neuralNetwork[6].weight.data.shape}, b={_model.neuralNetwork[6].bias.data.shape}") #model.neuralNetwork[6] the second Linear(x, y) layer. Layer 3 --> shape: x row, y columns  
     
             
         #Evaluate on TEST data for early stopping (Optimizer)  
@@ -589,79 +591,89 @@ def main():
         CONFIG["END_DATE"]
     )
     
-    if CONFIG["BAR_MODE"] == "dollar_bars":
-        timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
-        dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
-        time, openPrice, highPrice, lowPrice, closePrice, dollarVolume = formatDollarBarsToList(dollarBars)
-    else:   #CONFIG["BAR_MODE"] == "time_bars" 
-        time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
-        #_, _, _, _, closePrice, _ = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 2
+    for threshold in [25_000, 10_000]: #[500_000, 100_000, 50_000, 25_000, 10_000]:
+        CONFIG["DOLLAR_THRESHOLD"] = threshold
+        print(f"\n DOLLAR_THRESHOLD: {threshold}\n")
     
-    #2. Feature engineering 
-    print("\nStep 2: Creating features...")
-    X, y = createFeaturesAndLabels(closePrice, _lookback=CONFIG["LOOKBACK"])
-    print(f"--> Features shape: {X.shape}")
-    print(f"--> Labels shape: {y.shape}")
-    print(f"--> Positive class ratio: {y.mean():.2%}")
+        if CONFIG["BAR_MODE"] == "dollar_bars":
+            timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
+            dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
+            time, openPrice, highPrice, lowPrice, closePrice, dollarVolume = formatDollarBarsToList(dollarBars)
+        else:   #CONFIG["BAR_MODE"] == "time_bars" 
+            time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
+            #_, _, _, _, closePrice, _ = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 2
+            
+        for lookback in [16, 8]: #[16, 12, 8]: #[34, 32, 30, 20, 16]:
+            CONFIG["LOOKBACK"] = lookback
+            print(f"    LOOKBACK: {lookback}\n")
+                
+            #2. Feature engineering 
+            print("\nStep 2: Creating features...")
+            X, y = createFeaturesAndLabels(closePrice, _lookback=CONFIG["LOOKBACK"])
+            print(f"--> Features shape: {X.shape}")
+            print(f"--> Labels shape: {y.shape}")
+            print(f"--> Positive class ratio: {y.mean():.2%}")
 
-    #3. Train/Test split 
-    print("\nStep 3: Splitting data...")
-    XtrainData, XtestData, yTrainData, yTestData = trainTestSplit(
-        X, y, _trainRatio=CONFIG["TRAIN_SPLIT"] 
-    )
-    scaler = StandardScaler()                           #Normalize the features 
-    XtrainData = scaler.fit_transform(XtrainData)       #Fit on train data only 
-    XtestData = scaler.transform(XtestData)             #Apply same scale to test 
-    print(f"--> Train samples: {len(XtrainData)}")
-    print(f"--> Test samples:  {len(XtestData)}")
-    
-    #4. Build model 
-    print("\nStep 4: Building model...")
-    #One run
-    '''random.seed(42)
-    numpy.random.seed(42)
-    torch.manual_seed(42) #Remove or comment out, when you want variance across multiple runs (for the `runMultipleTimes(_iterations)` ).
-    model = PricePredictor(_inputSize=X.shape[1])
-    totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
-    print(f"--> Model created with {totalParameters} parameters")
-    
-    #5. Train 
-    print("\nStep 5: Training model...")
-    history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
-                         _epochs=CONFIG["EPOCHS"], 
-                         _learningRate=CONFIG["LEARNING_RATE"])
-    
-    #6. Evaluate 
-    print("\nStep 6: Evaluating the model...")
-    metrics = evaluateModel(model, XtestData, yTestData)
-    printEvaluation(metrics)'''
-    
-    #multiple runs
-    results = [] 
-    for itemSeed in [42, 43, 44, 45, 46]:
-        random.seed(itemSeed)
-        numpy.random.seed(itemSeed)
-        torch.manual_seed(itemSeed)
-        model = PricePredictor(_inputSize=X.shape[1])
-        totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
-        print(f"--> Model created with {totalParameters} parameters")
+            #3. Train/Test split 
+            print("\nStep 3: Splitting data...")
+            XtrainData, XtestData, yTrainData, yTestData = trainTestSplit(
+                X, y, _trainRatio=CONFIG["TRAIN_SPLIT"] 
+            )
+            scaler = StandardScaler()                           #Normalize the features 
+            XtrainData = scaler.fit_transform(XtrainData)       #Fit on train data only 
+            XtestData = scaler.transform(XtestData)             #Apply same scale to test 
+            print(f"--> Train samples: {len(XtrainData)}")
+            print(f"--> Test samples:  {len(XtestData)}")
+            
+            #4. Build model 
+            print("\nStep 4: Building model...")
+            #One run
+            '''random.seed(42)
+            numpy.random.seed(42)
+            torch.manual_seed(42) #Remove or comment out, when you want variance across multiple runs (for the `runMultipleTimes(_iterations)` ).
+            model = PricePredictor(_inputSize=X.shape[1])
+            totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
+            print(f"--> Model created with {totalParameters} parameters")
+            
+            #5. Train 
+            print("\nStep 5: Training model...")
+            history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
+                                _epochs=CONFIG["EPOCHS"], 
+                                _learningRate=CONFIG["LEARNING_RATE"])
+            
+            #6. Evaluate 
+            print("\nStep 6: Evaluating the model...")
+            metrics = evaluateModel(model, XtestData, yTestData)
+            printEvaluation(metrics)'''
+            
+            #multiple runs
+            results = [] 
+            for itemSeed in [42, 43, 44, 45, 46]:
+                random.seed(itemSeed)
+                numpy.random.seed(itemSeed)
+                torch.manual_seed(itemSeed)
+                model = PricePredictor(_inputSize=X.shape[1])
+                totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
+                print(f"--> Model created with {totalParameters} parameters")
+                
+                #5. Train 
+                print("\nStep 5: Training model...")
+                history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
+                                    _epochs=CONFIG["EPOCHS"], 
+                                    _learningRate=CONFIG["LEARNING_RATE"])
+                
+                #6. Evaluate 
+                print("\nStep 6: Evaluating the model...")
+                metrics = evaluateModel(model, XtestData, yTestData)
+                printEvaluation(metrics)
+                
+                results.append(metrics["accuracy"])     #test accuracy
+                print(f"Seed {itemSeed}: {metrics["accuracy"]:.4f}")
+                
+        #print(f"\nMean: {numpy.mean(results):.4f} ± {numpy.std(results):.4f}")
+        print(f"\nThreshold ${threshold:,.0f}:\n"
+              f"    Mean: {numpy.mean(results):.4f} ± {numpy.std(results):.4f}")
         
-        #5. Train 
-        print("\nStep 5: Training model...")
-        history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
-                            _epochs=CONFIG["EPOCHS"], 
-                            _learningRate=CONFIG["LEARNING_RATE"])
-        
-        #6. Evaluate 
-        print("\nStep 6: Evaluating the model...")
-        metrics = evaluateModel(model, XtestData, yTestData)
-        printEvaluation(metrics)
-        
-        results.append(metrics["accuracy"])     #test accuracy
-        print(f"Seed {itemSeed}: {metrics["accuracy"]:.4f}")
-        
-    print(f"\nMean: {numpy.mean(results):.4f} ± {numpy.std(results):.4f}")
-    
     #7. Visualize 
     print("\nStep 7: Generating plots...")
     plotTrainingHistory(history)
