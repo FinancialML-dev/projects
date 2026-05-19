@@ -5,16 +5,22 @@ Progresses from raw candlestick data → dollar bars → order flow features →
 
 &nbsp;
 
+## About
+
+This project demonstrates:
+- **Academic implementation:** Translating research papers to production code
+- **Systems thinking:** Building modular, reusable components
+- **Progressive learning:** Each module built from first principles
+- **Production quality:** Comprehensive docstrings, error handling, clean APIs
+
+Built as self-directed learning project implementing Lopez de Prado's 
+*Advances in Financial Machine Learning*.
+
+**Author:** Leo  
+
+&nbsp;
+
 ## Files
-
-### timebars.py — Raw implementation
-First working version. Fetches BTC/USD candlestick (OHLCV) data from Alpaca
-and plots it as an interactive Plotly candlestick chart.
-No functions, no config — straight procedural code to understand the data first.
-
-### timebarsRefactored.py — Refactored with functions
-Same as timebars.py but reorganized into functions with a `CONFIG` object.
-Shows the progression from working code → structured code.
 
 ### timebarsRefactoredFull.py — Full refactored version
 The final production-ready version. Adds:
@@ -27,14 +33,6 @@ The final production-ready version. Adds:
 ### timebarsWithOFI.py — Time bars + Order Flow Imbalance
 Extends timebarsRefactoredFull.py with OFI features, preparing time-bar data
 for the OFI-enhanced ML pipeline.
-
-### dollarBars.py — Dollar bars (raw)
-Constructs dollar bars from raw tick data — a more informative bar type than
-time bars (inspired by Lopez de Prado's *Advances in Financial ML*).
-Groups trades by dollar volume traded rather than fixed time intervals.
-
-### dollarBarsRefactored.py — Dollar bars with functions
-Same logic as dollarBars.py, reorganized into reusable functions.
 
 ### dollarBarsRefactoredFull.py — Dollar bars (production)
 Full implementation with:
@@ -79,18 +77,30 @@ Wires together the pipeline components.
 ## Progression
 
 ```
-timebars.py  →  timebarsRefactored.py  →  timebarsRefactoredFull.py  →  timebarsWithOFI.py
-raw script   →  functions + config     →  full feature set            →  + OFI features
+timebarsRefactoredFull.py    →  timebarsWithOFI.py
+(full feature set)           →  (+ OFI features)
 ↓
 stockPredictor.py
 (ML model — time bars)
 
-dollarBars.py  →  dollarBarsRefactored.py  →  dollarBarsRefactoredFull.py  →  dollarBarsWithOFI.py
-raw script     →  functions                →  production-ready              →  + OFI features
+
+dollarBarsRefactoredFull.py  →  dollarBarsWithOFI.py
+(production-ready)           →  (+ OFI features)
 ↓
 orderFlow.py (OFI calculation) ────────────→  pricePredictorWithOFI.py
 (ML model — OFI enhanced)
 ```
+
+## Implementation Approach
+
+Built progressively to understand each concept deeply:
+
+1. **Time bars** → Fetch OHLCV data from Alpaca
+2. **Dollar bars** → Information-based sampling (Lopez de Prado)
+3. **Order flow** → Calculate buy/sell pressure per bar
+4. **ML pipeline** → Neural network prediction (baseline vs OFI-enhanced)
+
+Each module: raw implementation → refactored → production-ready with full docstrings.
 
 
 ## Output files
@@ -105,6 +115,23 @@ uv sync
 
 Requires: `torch`, `numpy`, `pandas`, `plotly`, `matplotlib`, `alpaca-py`, `scikit-learn` 
 
+## Results
+
+### Dollar Bars Performance
+- **Compression:** 3.25x (26 time bars → 8 dollar bars)
+- **Benefit:** Uniform information density vs variable in time bars
+- **Use case:** Better feature distributions for ML models
+
+### Order Flow Imbalance
+- **Captures:** Buy vs sell aggressor volume per bar
+- **Range:** -1.0 (all selling) to +1.0 (all buying)
+- **Value:** Shows WHO is driving price movement, not just WHAT happened
+
+### ML Model
+- **Architecture:** 3-layer neural network (64→32→1 neurons)
+- **Features:** Returns, volatility, RSI, MA deviation, OFI
+- **Task:** Binary classification (next candle up/down)
+- **Evaluation:** Accuracy, precision, recall, F1, confusion matrix
 
 ## Author
 
