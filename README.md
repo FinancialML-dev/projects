@@ -1,4 +1,4 @@
-# financialProject - Dollar Bars & Order Flow Imbalance
+# Financial ML - Dollar Bars & Order Flow Imbalance
 
 A Financial ML pipeline built on cryptocurrency data from the Alpaca Market API.
 Progresses from raw candlestick data → dollar bars → order flow features → neural network prediction.
