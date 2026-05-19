@@ -187,7 +187,7 @@ def aggregateOrderFlowToBars(_trades, _barStarts, _barEnds):
 
     Returns:
         dict with numpy arrays, one value per bar:
-            - "order_Flow_Imbalance"  (float): OFI = (buyVol - sellVol) / (buyVol + sellVol), range [-1, +1].
+            - "order_flow_imbalance"  (float): OFI = (buyVol - sellVol) / (buyVol + sellVol), range [-1, +1].
             - "trade_count_imbalance" (float): (buyCount - sellCount) / totalCount, range [-1, +1].
             - "average_trade_size"    (float): Mean trade size per bar. 0.0 for empty bars.
 
@@ -207,7 +207,7 @@ def aggregateOrderFlowToBars(_trades, _barStarts, _barEnds):
         >>> barEnds   = [bar["timestamp"] for bar in dollarBars]
         >>> ofi = aggregateOrderFlowToBars(trades, barStarts, barEnds)
         --> Aggregated Order Flow Imbalance (OFI) for 42 bars
-        >>> print(ofi["order_Flow_Imbalance"][:3])
+        >>> print(ofi["order_flow_imbalance"][:3])
         [ 0.42  -0.18   0.07]   # bar 0: buy-heavy, bar 1: sell-heavy, bar 2: balanced
     """
     numberOfBars = len(_barStarts)

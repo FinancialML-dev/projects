@@ -148,7 +148,8 @@ def createDollarBars(_timeBars, _dollarThreshold):
     Iterates through time bars accumulating dollar volume (volume * midpoint price).
     When the running total meets or exceeds _dollarThreshold, a new dollar bar is
     closed and the accumulators reset. The bar timestamp is set to the next calendar
-    day after the closing bar.
+    day after the closing bar. Order Flow Imbalance (OFI) is computed per bar as the normalized price
+    displacement: (close - open) / (high - low), clamped to 0.0 when bar range is zero.
     (Samples data based on cumulative dollar volume instead of time.
     Each bar contains approximately the same dollar volume traded.)
     
@@ -156,7 +157,8 @@ def createDollarBars(_timeBars, _dollarThreshold):
     1. Calculate dollar volume for each time bar (volume * midpoint_price)
     2. Accumulate dollar volume
     3. When threshold is exceeded, create new dollar bar
-    4. Reset accumulator and repeat
+    4. Compute OFI as (close - bar_open) / (high - low)
+    5. Reset accumulator and repeat
 
     Args:
         _timeBars (list[dict]): List of OHLCV dicts as returned by
@@ -167,13 +169,14 @@ def createDollarBars(_timeBars, _dollarThreshold):
 
     Returns:
         list[dict]: A list of dollar bar dicts, each with keys:
-                    - "barStart"     (datetime): Timestamp of the first time bar in the bucket/bar.
-                    - "timestamp"    (datetime): Day after the bar closed.
-                    - "open"         (float):    Open price of the first bar in the bucket.
-                    - "high"         (float):    Highest high across all bars in the bucket.
-                    - "low"          (float):    Lowest low across all bars in the bucket.
-                    - "close"        (float):    Close price of the last bar in the bucket.
-                    - "dollar_volume"(float):    Total dollar volume that triggered the bar.
+                    - "bar_start"               (datetime): Timestamp of the first time bar in the bucket/bar.
+                    - "timestamp"               (datetime): Day after the bar closed.
+                    - "open"                    (float):    Open price of the first bar in the bucket.
+                    - "high"                    (float):    Highest high across all bars in the bucket.
+                    - "low"                     (float):    Lowest low across all bars in the bucket.
+                    - "close"                   (float):    Close price of the last bar in the bucket.
+                    - "dollar_volume"           (float):    Total dollar volume that triggered the bar.
+                    - "order_flow_imbalance"    (float):    (close - open) / (high - low); 0.0 if range is zero.
                     (fewer bars than input, variable time spacing)
 
     Raises:
@@ -189,9 +192,9 @@ def createDollarBars(_timeBars, _dollarThreshold):
         >>> barsList = formatBarsToDictionaryList(bars, "BTC/USD")
         >>> dollarBars = createDollarBars(barsList, _dollarThreshold=500_000_000)
         >>> print(dollarBars[0])
-        {"barStart": datetime(...), "timestamp": datetime(...), "open": 42000.0, "high": 44000.0,
-         "low": 41500.0, "close": 43800.0, "dollar_volume": 503_218_400.0}
-    """
+        {"bar_start": datetime(...), "timestamp": datetime(...), "open": 42000.0, "high": 44000.0,
+         "low": 41500.0, "close": 43800.0, "dollar_volume": 503_218_400.0, "order_flow_imbalance": 0.92}
+    """    
     dollarBars = []
 
     #Running accumulators 
@@ -199,6 +202,7 @@ def createDollarBars(_timeBars, _dollarThreshold):
     runningHigh = 0
     runningLow = math.inf
     barStart = None             #track start of each bucket/bar 
+    barOpen = None              #open price of the first time bar in the current bucket 
     
     print(f"\nCreating dollar bars with ${_dollarThreshold:,.0f} threshold...")
 
@@ -213,6 +217,7 @@ def createDollarBars(_timeBars, _dollarThreshold):
         
         if barStart is None:        #Mark start of new bucket/bar 
             barStart = time 
+            barOpen = openPrice
         
         #Calculate dollar volume using midpoint price (the average of the opening price and the closing price)
         midpointPrice = (openPrice + closePrice)/2 
@@ -226,6 +231,8 @@ def createDollarBars(_timeBars, _dollarThreshold):
         if runningVolume + dollarVolume >= _dollarThreshold:
             #Create new dollar bar 
             barTimestamp = time + timedelta(days=1)      #Next minute after bar close
+            barRange = runningHigh - runningLow
+            orderFlowImbalance = (closePrice - barOpen)/barRange if barRange > 0 else 0.0
             
             dollarBars.append({
                 "bar_start": barStart,                              #When this bucket/bar opened
@@ -234,7 +241,8 @@ def createDollarBars(_timeBars, _dollarThreshold):
                 "high": runningHigh,
                 "low": runningLow,
                 "close": closePrice,
-                "dollar_volume": runningVolume + dollarVolume 
+                "dollar_volume": runningVolume + dollarVolume, 
+                "order_flow_imbalance": orderFlowImbalance
             })
         
             #Reset accumulators 
@@ -242,6 +250,7 @@ def createDollarBars(_timeBars, _dollarThreshold):
             runningHigh = 0
             runningLow = math.inf
             barStart = None                                         #reset for next bucket/bar
+            barOpen = None
         else:
             #Accumulate 
             runningVolume += dollarVolume
@@ -265,18 +274,19 @@ def formatDollarBarsToList(_dollarBars):
     Args:
         _dollarBars (list[dict]): List of dollar bar dicts as returned by
                                   createDollarBars(). Each dict must have keys:
-                                  "barStart", "timestamp", "open", "high", "low", 
-                                  "close", "dollar_volume".
+                                  "bar_start", "timestamp", "open", "high", "low", 
+                                  "close", "dollar_volume", "order_flow_imbalance".
 
     Returns:
-        tuple: A 7-tuple of lists in this order:
-               - barStarts     (list[datatime]): Start timestamp of each bucket/bar.
-               - times         (list[datetime]): Bar timestamps.
-               - openPrices    (list[float]):    Opening prices.
-               - highPrices    (list[float]):    Highest prices.
-               - lowPrices     (list[float]):    Lowest prices.
-               - closePrices   (list[float]):    Closing prices.
-               - dollarVolumes (list[float]):    Dollar volumes.
+        tuple: A 8-tuple of lists in this order:
+               - barStarts                  (list[datatime]): Start timestamp of each bucket/bar.
+               - times                      (list[datetime]): Bar timestamps.
+               - openPrices                 (list[float]):    Opening prices.
+               - highPrices                 (list[float]):    Highest prices.
+               - lowPrices                  (list[float]):    Lowest prices.
+               - closePrices                (list[float]):    Closing prices.
+               - dollarVolumes              (list[float]):    Dollar volumes.
+               - orderFlowImbalanceValues   (list[float]):    OFI per bar; defaults to 0.0 if key absent.
 
     Raises:
         KeyError: If any dict in _dollarBars is missing an expected key
@@ -286,10 +296,12 @@ def formatDollarBarsToList(_dollarBars):
 
     Example:
         >>> dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
-        >>> barStarts, times, opens, highs, lows, closes, volumes = formatDollarBarsToList(dollarBars)
-        >>> print(len(times))       #Same as len(dollarBars)
-        >>> print(opens[0])         #First bar's open price
+        >>> barStarts, times, opens, highs, lows, closes, volumes, orderFlowImbalance = formatDollarBarsToList(dollarBars)
+        >>> print(len(times))               #Same as len(dollarBars)
+        >>> print(opens[0])                 #First bar's open price
         42000.0
+        >>> print(orderFlowImbalance[0])    #First bar's OFI
+        0.92
     """
     barStarts = []          
     times = []              #dates
@@ -298,6 +310,7 @@ def formatDollarBarsToList(_dollarBars):
     lowPrices = []
     closePrices = []
     dollarVolumes = []
+    orderFlowImbalanceValues = []
 
     #Formatting the data into a format/shape we can work with
     for item in _dollarBars: 
@@ -308,10 +321,11 @@ def formatDollarBarsToList(_dollarBars):
         lowPrices.append(item["low"])
         closePrices.append(item["close"])
         dollarVolumes.append(item["dollar_volume"])
+        orderFlowImbalanceValues.append(item.get("order_flow_imbalance", 0.0)) #why not use item["order_flow_imbalance"]
         
     print(f"Formatted {len(dollarVolumes)} dollar bars")
     
-    return barStarts, times, openPrices, highPrices, lowPrices, closePrices, dollarVolumes
+    return barStarts, times, openPrices, highPrices, lowPrices, closePrices, dollarVolumes, orderFlowImbalanceValues
 
 
 #-------------------------------

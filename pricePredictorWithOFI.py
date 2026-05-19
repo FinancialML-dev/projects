@@ -33,7 +33,8 @@ BASE_CONFIG = {
     "BATCH_SIZE": 32,
     "DOLLAR_THRESHOLD": 500_000,            #$500K per dollar bar
     "USE_PRICE_RELATIVE_TO_MA": True,       #Toggle on/off
-    "USE_VOLUME_FEATURES": True             #Toggle on/off: intra-bar momentum, bar range, volume ratio, VWAP deviation 
+    "USE_VOLUME_FEATURES": True,            #Toggle on/off: intra-bar momentum, bar range, volume ratio, VWAP deviation 
+    "USE_ORDER_FLOW_IMBALANCE": True        #Toggel on/off: Order flow imbalance 
 }
 
 TIME_BARS_CONFIG = {
@@ -401,7 +402,7 @@ def calculateVWAPDeviation(_highs, _lows, _closes, _dollarVolumes, _window=20):
     return deviation
 
 
-def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _lowPrices=None, _volumes=None, _lookback=30): 
+def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _lowPrices=None, _volumes=None, _orderFlowImbalance=None, _lookback=30): 
     """
     Builds a sliding-window dataset of return sequences and binary direction labels.
     (Create feature windows and labels for supervised learning.)
@@ -412,29 +413,33 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     Label is whether price went up at time t --> (1) or down (0).)
 
     Feature composition (per CONFIG flags):
-        Always included : returns, volatility, RSI          → _lookback * 3 columns
-        USE_PRICE_RELATIVE_TO_MA=True                       → _lookback * 4 columns
-        USE_VOLUME_FEATURES=True + volumes provided         → _lookback * 6 columns
-                                                              (adds intraBarMomentum,
-                                                               barRange, vwapDeviation)
+        Always included : returns, volatility, RSI                      → _lookback * 3 columns
+        USE_PRICE_RELATIVE_TO_MA=True                                   → _lookback * 4 columns
+        USE_VOLUME_FEATURES=True + volumes provided                     → _lookback * 6 columns
+                                                                          (adds intraBarMomentum,
+                                                                          barRange, vwapDeviation)
+        USE_ORDER_FLOW_IMBALANCE=True + _orderFlowImbalance provided    → _lookback * 7 columns
 
     Args:
-        _closePrices  (list):           List of close prices. Required.
-        _openPrices   (list, optional): List of open prices. Required when
-                                        USE_VOLUME_FEATURES is True.
-        _highPrices   (list, optional): List of high prices. Required when
-                                        USE_VOLUME_FEATURES is True.
-        _lowPrices    (list, optional): List of low prices. Required when
-                                        USE_VOLUME_FEATURES is True.
-        _volumes      (list, optional): List of dollar volumes. Required when
-                                        USE_VOLUME_FEATURES is True.
-        _lookback     (int, optional):  Number of past returns per feature window.
-                                        Defaults to 30.
+        _closePrices         (list):           List of close prices. Required.
+        _openPrices          (list, optional): List of open prices. Required when
+                                               USE_VOLUME_FEATURES is True.
+        _highPrices          (list, optional): List of high prices. Required when
+                                               USE_VOLUME_FEATURES is True.
+        _lowPrices           (list, optional): List of low prices. Required when
+                                               USE_VOLUME_FEATURES is True.
+        _volumes             (list, optional): List of dollar volumes. Required when
+                                               USE_VOLUME_FEATURES is True.
+        _orderFlowImbalance  (list, optional): List of OFI values per bar. Required when
+                                               USE_ORDER_FLOW_IMBALANCE is True.
+                                               OFI = (close - open) / (high - low).
+        _lookback            (int, optional):  Number of past returns per feature window.
+                                               Defaults to 30.
 
     Returns:
         tuple:
             - features (numpy.ndarray): Shape (N, _lookback * F) — each row is a return window. Where F is the
-                                        number of active feature arrays (3–6,
+                                        number of active feature arrays (3–7,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
             - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
@@ -442,7 +447,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
-                    or "LOOKBACK" keys.
+                    "USE_ORDER_FLOW_IMBALANCE", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
@@ -451,7 +456,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                     labels will both be empty arrays).
 
     Example:
-        >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False
+        >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, USE_ORDER_FLOW_IMBALANCE=False
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
@@ -463,13 +468,16 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     rsi = calculateRSI(_closePrices, _window=14)
     priceRelativeToMA = calculatePriceRelativeToMA(_closePrices, _window=20)
     useVolumeFeatures = CONFIG.get("USE_VOLUME_FEATURES", False) and _volumes is not None
+    useOrderFlowImbalance = _orderFlowImbalance is not None and CONFIG.get("USE_ORDER_FLOW_IMBALANCE", False)
     if useVolumeFeatures:
         intraBarMomentum = calculateIntraBarMomentum(_openPrices, _closePrices)
         barRange = calculateBarRange(_highPrices, _lowPrices, _closePrices)
         volumeRatio = calculateVolumeRatio(_volumes, _window=14)
         vwapDeviation = calculateVWAPDeviation(_highPrices, _lowPrices, _closePrices, _volumes, _window=20)
         
-    
+    if useOrderFlowImbalance:
+        orderFlowImbalance = numpy.array(_orderFlowImbalance)
+        
     #Align all arrays - RSI is based on prices (length N),
     #returns/volatility are length N-1. Trim RSI to match.
     #Align to returns/priceRelativeToMA length (N-1)
@@ -480,6 +488,8 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         barRange = barRange[1:]
         volumeRatio = volumeRatio[1:]
         vwapDeviation = vwapDeviation[1:]
+    if useOrderFlowImbalance:
+        orderFlowImbalance = orderFlowImbalance[1:]
     
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
@@ -504,6 +514,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         barRange = barRange[validStartIndex:]
         volumeRatio = volumeRatio[validStartIndex:]
         vwapDeviation = vwapDeviation[validStartIndex:]
+    
+    if useOrderFlowImbalance:
+        orderFlowImbalance = orderFlowImbalance[validStartIndex:]
     
     features = []
     labels = []
@@ -538,6 +551,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
             featureParts.append(barRange[i - _lookback:i])
             #featureParts.append(volumeRatio[i - _lookback:i])
             featureParts.append(vwapDeviation[i - _lookback:i])
+        
+        if useOrderFlowImbalance: 
+            featureParts.append(orderFlowImbalance[i - _lookback:i])
         
         window = numpy.concatenate(featureParts)
         
@@ -978,13 +994,15 @@ def main():
         CONFIG["DOLLAR_THRESHOLD"] = threshold
         print(f"\n DOLLAR_THRESHOLD: {threshold}\n")
     
+        orderFlowImbalance = None 
         if CONFIG["BAR_MODE"] == "dollar_bars":
             timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
             dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
-            barStart, time, openPrice, highPrice, lowPrice, closePrice, dollarVolume = formatDollarBarsToList(dollarBars)
+            barStart, time, openPrice, highPrice, lowPrice, closePrice, dollarVolume, orderFlowImbalanceList = formatDollarBarsToList(dollarBars)
+            if CONFIG["USE_ORDER_FLOW_IMBALANCE"]: 
+                orderFlowImbalance = numpy.array(orderFlowImbalanceList)
         else:   #CONFIG["BAR_MODE"] == "time_bars" 
             time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
-            #_, _, _, _, closePrice, _ = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 2
             
         for lookback in [8]: #[16, 8]: #[16, 12, 8]: #[34, 32, 30, 20, 16]:
             CONFIG["LOOKBACK"] = lookback
@@ -997,6 +1015,7 @@ def main():
                                            _highPrices=highPrice,
                                            _lowPrices=lowPrice,
                                            _volumes=dollarVolume,
+                                           _orderFlowImbalance=orderFlowImbalance, 
                                            _lookback=CONFIG["LOOKBACK"]
                                            )
             print(f"--> Features shape: {X.shape}")
