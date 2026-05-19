@@ -1,7 +1,7 @@
 # financialProject
 
 A financial ML pipeline built on cryptocurrency data from the Alpaca Market API.
-Progresses from raw candlestick data → feature engineering → neural network prediction.
+Progresses from raw candlestick data → dollar bars → order flow features → neural network prediction.
 
 &nbsp;
 
@@ -24,22 +24,52 @@ The final production-ready version. Adds:
 - `printStatistics()` — summary stats (price range, change %, total volume)
 - Full docstrings with examples on all functions
 
+### timebarsWithOFI.py — Time bars + Order Flow Imbalance
+Extends timebarsRefactoredFull.py with OFI features, preparing time-bar data
+for the OFI-enhanced ML pipeline.
+
+### dollarBars.py — Dollar bars (raw)
+Constructs dollar bars from raw tick data — a more informative bar type than
+time bars (inspired by Lopez de Prado's *Advances in Financial ML*).
+Groups trades by dollar volume traded rather than fixed time intervals.
+
+### dollarBarsRefactored.py — Dollar bars with functions
+Same logic as dollarBars.py, reorganized into reusable functions.
+
+### dollarBarsRefactoredFull.py — Dollar bars (production)
+Full implementation with:
+- `fetchCryptoData()` — Alpaca API calls
+- `createDollarBars()` — core bar construction (threshold: $500K/bar)
+- `formatBarsToDictionaryList()` / `formatDollarBarsToList()` — data formatting
+- Comprehensive docstrings throughout
+
+### dollarBarsWithOFI.py — Dollar bars + Order Flow Imbalance
+Combines dollar bar construction with OFI metrics. Integrates individual trade data
+(taker side: B=buy, S=sell) to enrich each bar with buy/sell pressure signals.
+The primary data source for the OFI-enhanced predictor.
+
+### orderFlow.py — Order Flow Imbalance module
+Standalone module for OFI calculation:
+- `fetchCryptoTrades()` — fetches individual tick-level trades from Alpaca
+- `fetchCryptoTradesChunked()` — handles large date ranges with weekly chunking
+- Computes OFI = buy-initiated volume − sell-initiated volume per bar
+- Captures market microstructure: who is driving price?
+
 ### stockPredictor.py — Neural network price direction predictor
 Predicts whether the next candle closes up (1) or down (0).
 Full supervised ML pipeline:
-1. Fetch BTC/USD minute data via Alpaca
-2. Calculate returns `(price[t] - price[t-1]) / price[t-1]`
-3. Build sliding-window features (lookback=30) + binary labels
+1. Fetch BTC/USD data via Alpaca (dollar bars mode)
+2. Feature engineering: returns, rolling volatility, RSI, price-relative-to-MA, volume features
+3. Build sliding-window features (lookback=32) + binary labels
 4. Train/test split (80/20, chronological — no shuffling)
 5. `PricePredictor` — 3-layer neural network (Linear → ReLU → Dropout) × 2 + Sigmoid output
 6. Train with Adam optimizer + BCELoss
 7. Evaluate with accuracy, precision, recall, F1, confusion matrix
 8. Plot training history (loss + accuracy curves)
 
-### dollarBars.py — Dollar bars (in progress)
-Constructs dollar bars from raw tick data — a more informative bar type than
-time bars (inspired by Lopez de Prado's *Advances in Financial ML*).
-Groups trades by dollar volume traded rather than fixed time intervals.
+### pricePredictorWithOFI.py — Neural network with OFI features
+Same architecture as stockPredictor.py but uses OFI-enriched dollar bars as input.
+Adds order flow imbalance as a feature alongside returns, volatility, and RSI.
 
 ### main.py — Entry point
 Wires together the pipeline components.
@@ -49,8 +79,17 @@ Wires together the pipeline components.
 ## Progression
 
 ```
-timebars.py  →  timebarsRefactored.py  →  timebarsRefactoredFull.py  →  stockPredictor.py  →  dollarBars.py
-raw script   →  functions + config     →  full feature set            →  ML model           →  advanced bars
+timebars.py  →  timebarsRefactored.py  →  timebarsRefactoredFull.py  →  timebarsWithOFI.py
+raw script   →  functions + config     →  full feature set            →  + OFI features
+↓
+stockPredictor.py
+(ML model — time bars)
+
+dollarBars.py  →  dollarBarsRefactored.py  →  dollarBarsRefactoredFull.py  →  dollarBarsWithOFI.py
+raw script     →  functions                →  production-ready              →  + OFI features
+↓
+orderFlow.py (OFI calculation) ────────────→  pricePredictorWithOFI.py
+(ML model — OFI enhanced)
 ```
 
 
@@ -64,7 +103,7 @@ raw script   →  functions + config     →  full feature set            →  M
 uv sync
 ``` 
 
-Requires: `torch`, `numpy`, `pandas`, `plotly`, `matplotlib`, `alpaca-py` 
+Requires: `torch`, `numpy`, `pandas`, `plotly`, `matplotlib`, `alpaca-py`, `scikit-learn` 
 
 
 ## Author
