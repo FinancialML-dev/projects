@@ -20,6 +20,33 @@ Built as self-directed learning project implementing Lopez de Prado's
 
 &nbsp;
 
+## Quick Start
+
+```python
+# 1. Fetch and create dollar bars
+from dollarBars import fetchCryptoData, createDollarBars, formatDollarBarsToLists
+from datetime import datetime
+from alpaca.data.timeframe import TimeFrame
+
+bars = fetchCryptoData("BTC/USD", TimeFrame.Day, datetime(2026, 3, 1), datetime(2026, 4, 1))
+timebars = formatBarsToDictionaryList(bars, "BTC/USD")
+dollarBars = createDollarBars(timebars, threshold=500_000)
+
+# 2. Calculate Order Flow Imbalance
+from orderFlow import fetchCryptoTradesChunked, aggregateOrderFlowToBars
+
+trades = fetchCryptoTradesChunked("BTC/USD", start, end)
+ofi = aggregateOrderFlowToBars(trades, barStarts, barEnds)
+
+# 3. Train ML model
+from pricePredictorWithOFI import PricePredictor, trainModel
+
+model = PricePredictor(input_features=128)
+history = trainModel(model, features, labels, epochs=1000)
+```
+
+&nbsp;
+
 ## Files
 
 ### timebarsRefactoredFull.py — Full refactored version
