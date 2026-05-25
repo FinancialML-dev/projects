@@ -30,11 +30,12 @@ BASE_CONFIG = {
     "TRAIN_SPLIT": 0.8,                     #80% training data, 20% test data 
     "EPOCHS": 1000,                          #<100> Iterations
     "LEARNING_RATE": 0.001,                 #0.001 
-    "BATCH_SIZE": 32,
+    "BATCH_SIZE": 2048, #32,
     "DOLLAR_THRESHOLD": 500_000,            #$500K per dollar bar
     "USE_PRICE_RELATIVE_TO_MA": True,       #Toggle on/off
     "USE_VOLUME_FEATURES": True,            #Toggle on/off: intra-bar momentum, bar range, volume ratio, VWAP deviation 
-    "USE_ORDER_FLOW_IMBALANCE": True        #Toggel on/off: Order flow imbalance 
+    "USE_ORDER_FLOW_IMBALANCE": True,       #Toggel on/off: Order flow imbalance 
+    "MODEL": "lstm"                         #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
 }
 
 TIME_BARS_CONFIG = {
@@ -655,58 +656,147 @@ class PricePredictor(torch.nn.Module):
     def forward(self, _x):
         return self.neuralNetwork(_x)
 
+
+class PricePredictorLSTM(torch.nn.Module):
+    """
+    Long Short Term Memory (LSTM)-based binary classifier for predicting next-bar price direction.
+
+    Wraps a PyTorch LSTM followed by a small feedforward classifier head.
+    Expects flat feature vectors from createFeaturesAndLabels() and reshapes
+    them internally into (batch, lookback, numberFeatures) sequences before
+    passing them to the LSTM.
+    
+    Short: Reshapes the flat feature vector back into a sequence (lookback, num_features)
+    so the LSTM can learn patterns across timesteps — something the feedforward
+    model cannot do since it treats all timesteps as independent inputs.
+
+    Architecture:
+        Input  : flat vector of shape (batch, lookback * numberFeatures)
+        Reshape: (batch, numberFeatures, lookback) → transpose → (batch, lookback, numberFeatures)
+        LSTM   : _numberLayers stacked LSTM layers, hidden size _hiddenSize, dropout=0.2
+        Head   : Linear(_hiddenSize → 32) → ReLU → Dropout(0.2) → Linear(32 → 1) → Sigmoid
+        Output : scalar in (0, 1) — probability that next bar closes up
+
+    Args:
+        _numberFeatures (int): Number of features per timestep (F in the feature matrix). (= total input size / lookback).
+                            Must match the F used in createFeaturesAndLabels().
+        _lookback       (int): Number of timesteps per sequence window.
+                            Must match CONFIG["LOOKBACK"].
+        _hiddenSize     (int, optional): LSTM hidden state size. Defaults to 64.
+        _numberLayers   (int, optional): Number of stacked LSTM layers. Defaults to 2.
+
+    Raises:
+        RuntimeError: If the flat input vector length does not equal
+                    _lookback * _numberFeatures — the reshape in forward()
+                    will produce an incorrect tensor shape and the LSTM
+                    will reject it.
+        RuntimeError: If _numberLayers > 1 and dropout=0.2 is applied —
+                    PyTorch emits a warning (not an error) if _numberLayers=1
+                    since dropout has no effect between layers that don't exist.
+
+    Example:
+        >>> numberFeatures = 7        # returns, volatility, RSI, MA, momentum, barRange, OFI
+        >>> lookback = 30
+        >>> model = PricePredictorLSTM(_numberFeatures=numberFeatures, _lookback=lookback)
+        >>> features, labels = createFeaturesAndLabels(closes, _orderFlowImbalance=ofi, _lookback=lookback)
+        >>> Xtrain, Xtest, yTrain, yTest = trainTestSplit(features, labels)
+        >>> history = trainModel(model, Xtrain, yTrain, Xtest, yTest, _epochs=100)
+        >>> print(model)
+        PricePredictorLSTM(lstm=LSTM(7, 64, num_layers=2, ...), classifier=Sequential(...))
+    """    
+    def __init__(self, _numberFeatures, _lookback, _hiddenSize=64, _numberLayers=2):
+        super().__init__()
+        self.numberFeatures = _numberFeatures
+        self.lookback = _lookback
+        
+        self.lstm = torch.nn.LSTM(
+            input_size=_numberFeatures,
+            hidden_size=_hiddenSize,
+            num_layers=_numberLayers,
+            batch_first=True,
+            dropout=0.2
+        )
+        
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Linear(_hiddenSize, 32),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(32, 1),
+            torch.nn.Sigmoid()
+        )
+        
+    def forward(self, _x):
+        # _x: (batch, lookback * numberFeatures) - flat vector from createFeaturesAndLabels
+        # Feature are laid out as: [f1_t0..f1_t7, f2_t0..f2_t7, ...]
+        # Reshape to (batch, numberFeatures, lookback) then transpose to 
+        # (batch, lookback, numberFeatures) - the format LSTM expects 
+        x = _x.view(_x.size(0), self.numberFeatures, self.lookback)
+        x = x.transpose(1, 2)                           # (batch, lookback, numberFeatures)
+        
+        lstmOut, _ = self.lstm(x)                       # (batch, lookback, hidden_size) 
+        lastHidden = lstmOut[:, -1, :]                  # last timestamp: (batch, hidden_size)
+
+        return self.classifier(lastHidden)
+
+
 #-------------------------------
 #Training: Train the model (our Neural Network)
 #-------------------------------
 def trainModel(_model, _Xtrain, _yTrain, _Xtest, _yTest, _epochs=100, _learningRate=0.001, _batchSize=32): 
     """
-    Trains the PricePredictor model using binary cross-entropy loss and Adam optimizer.
+    Trains the PricePredictor model using mini-batch gradient descent, BCELoss, and Adam optimizer.
 
-    Runs a forward pass, computes loss, backpropagates gradients, and updates
-    weights each epoch. Prints loss and accuracy every 20 epochs.
+    Each epoch iterates over shuffled mini-batches via DataLoader. Loss and accuracy
+    are averaged across all batches in the epoch before being recorded. Early stopping
+    monitors test loss and halts training if no improvement is seen for `patience` epochs,
+    then restores the best weights before returning.
 
     Args:
-        _model (PricePredictor):       The neural network to train.
-        _Xtrain (numpy.ndarray):       Training features of shape (N, lookback).
-        _yTrain (numpy.ndarray):       Training labels of shape (N,) with values 0 or 1.
-        _Xtest (numpy.ndarray):        Test features used for early stopping evaluation.
-        _yTest (numpy.ndarray):        Test labels used for early stopping evaluation.
-        _epochs (int, optional):       Number of training iterations. Defaults to 100.
+        _model        (torch.nn.Module): The neural network to train (PricePredictor or PricePredictorLSTM).
+        _Xtrain       (numpy.ndarray):   Training features of shape (N, lookback * F).
+        _yTrain       (numpy.ndarray):   Training labels of shape (N,) with values 0 or 1.
+        _Xtest        (numpy.ndarray):   Test features used for early stopping evaluation.
+        _yTest        (numpy.ndarray):   Test labels used for early stopping evaluation.
+        _epochs       (int, optional):   Maximum number of full passes over the training data. Defaults to 100.
         _learningRate (float, optional): Step size for Adam optimizer. Defaults to 0.001.
-        _batchSize (int, optional):    Batch size (reserved for future use). Defaults to 32.
+        _batchSize    (int, optional):   Number of samples per mini-batch. DataLoader shuffles
 
     Returns:
         dict: Training history with keys:
-            - "loss"     (list): Loss value recorded each epoch.
-            - "accuracy" (list): Accuracy value recorded each epoch.
+            - "loss"     (list[float]): Epoch-averaged training loss across all mini-batches.
+            - "accuracy" (list[float]): Epoch-averaged training accuracy across all mini-batches.
 
     Raises:
-        RuntimeError:      If the feature dimension of _Xtrain does not match the
-                           model's _inputSize (PyTorch Linear layer rejects mismatched
-                           shapes on the first forward pass).
+        RuntimeError:      If the feature dimension of _Xtrain does not match the model's
+                           expected input size (PyTorch rejects mismatched shapes on the
+                           first forward pass).
         ValueError:        If _Xtrain and _yTrain have different numbers of rows
                            (BCELoss will fail when comparing predictions to labels).
         UnboundLocalError: If _epochs=0 — the training loop never runs, so
                            bestModelWeights is never assigned and load_state_dict()
                            raises on the restore step after the loop.
-
+        
     Example:
-        >>> model = PricePredictor(_inputSize=30)
+        >>> model = PricePredictorLSTM(_numberFeatures=7, _lookback=30)
         >>> XtrainData, XtestData, yTrainData, yTestData = trainTestSplit(features, labels)
-        >>> history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData, _epochs=100, _learningRate=0.001)
+        >>> history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData, _epochs=100, _batchSize=32)
         --------------------
         Training...
         --------------------
         Epoch/Iteration   0: Loss=0.7124, Accuracy=0.4823
         Epoch/Iteration  20: Loss=0.6891, Accuracy=0.5241
         Epoch/Iteration  40: Loss=0.6543, Accuracy=0.5780
-        ...
+        Early stopping at epoch/iteration 63
         --------------------
     """
     XtrainData = torch.FloatTensor(_Xtrain)
     yTrainData = torch.FloatTensor(_yTrain).reshape(-1, 1) 
     XtestData = torch.FloatTensor(_Xtest)
     yTestData = torch.FloatTensor(_yTest).reshape(-1, 1)
+    
+    # DataLoader handles shuffling and splitting into mini-batch each epoch 
+    dataset = torch.utils.data.TensorDataset(XtrainData, yTrainData)
+    dataLoader = torch.utils.data.DataLoader(dataset, batch_size=_batchSize, shuffle=True)
     
     optimizer = torch.optim.Adam(_model.parameters(), lr=_learningRate)
     criterion = torch.nn.BCELoss()
@@ -719,29 +809,41 @@ def trainModel(_model, _Xtrain, _yTrain, _Xtest, _yTest, _epochs=100, _learningR
     
     #Early stopping - stop training when test accuracy stops improving. Than running all fixed epochs/iterations.
     bestLoss = float("inf")
-    patience = 50           #Stop if no improvement for 50 epochs 
+    patience = 15 #40 #50           #Stop if no improvement for 50 epochs 
     noImpove = 0
     
     for item in range(_epochs):
         _model.train()
         
-        #Forward pass
-        predictions = _model(XtrainData)
-        loss = criterion(predictions, yTrainData)
+        batchLosses = []
+        batchAccuracies = []
         
-        #Backward pass
-        optimizer.zero_grad()       #Reset/Clear all gradients 
-        loss.backward()             #partial derivative of dLoss/dmodel = ..., dLoss/dy = ... [chain rule applied]
-        optimizer.step()            #Performs a single optimization step
+        #Mini-batch loop 
+        for Xbatch, yBatch in dataLoader:
         
-        #Calculate accuracy 
-        accuracy = ( (predictions > 0.5).float() == yTrainData ).float().mean()
+            #Forward pass
+            predictions = _model(Xbatch)
+            loss = criterion(predictions, yBatch)
         
-        history["loss"].append(loss.item())
-        history["accuracy"].append(accuracy.item())
+            #Backward pass
+            optimizer.zero_grad()       #Reset/Clear all gradients 
+            loss.backward()             #partial derivative of dLoss/dmodel = ..., dLoss/dy = ... [chain rule applied]
+            optimizer.step()            #Performs a single optimization step
+        
+            #Calculate accuracy 
+            accuracy = ( (predictions > 0.5).float() == yBatch ).float().mean()
+            batchLosses.append(loss.item())
+            batchAccuracies.append(accuracy.item()) 
+        
+        #Average loss and accuracy across all batches in this epoch/"a full cycle iteration"
+        epochLoss = sum(batchLosses) / len(batchLosses) 
+        epochAccuracy = sum(batchAccuracies) / len(batchAccuracies)
+        
+        history["loss"].append(epochLoss)
+        history["accuracy"].append(epochAccuracy)
         
         if item % 20 == 0:
-            print(f"Epoch/Iteration {item:3d}: Loss={loss.item():.4f}, Accuracy={accuracy.item():.4f} ") 
+            print(f"Epoch/Iteration {item:3d}: Loss={epochLoss:.4f}, Accuracy={epochAccuracy:.4f} ") 
             #print(f"    Layer 1: w={_model.neuralNetwork[0].weight.data.shape}, b={_model.neuralNetwork[0].bias.data.shape}") #Our model wraps the Sequential inside `self.neuralNetwork` --> So, For Sequential model we use: model.neuralNetwork[0] the first Linear(x, y) layer. Layer 1 --> shape: x rows, y column 
             #print(f"    Layer 2: w={_model.neuralNetwork[3].weight.data.shape}, b={_model.neuralNetwork[3].bias.data.shape}") #model.neuralNetwork[3] the second Linear(x, y) layer. Layer 2 --> shape: x row, y columns  
             #print(f"    Layer 3: w={_model.neuralNetwork[6].weight.data.shape}, b={_model.neuralNetwork[6].bias.data.shape}") #model.neuralNetwork[6] the second Linear(x, y) layer. Layer 3 --> shape: x row, y columns  
@@ -1062,7 +1164,12 @@ def main():
                 random.seed(itemSeed)
                 numpy.random.seed(itemSeed)
                 torch.manual_seed(itemSeed)
-                model = PricePredictor(_inputSize=X.shape[1])
+                numberFeatures = X.shape[1] // CONFIG["LOOKBACK"]
+                if CONFIG["MODEL"] == "lstm":
+                    model = PricePredictorLSTM(_numberFeatures=numberFeatures, _lookback=CONFIG["LOOKBACK"])
+                else: 
+                    model = PricePredictor(_inputSize=X.shape[1])
+                
                 totalParameters = sum(_parameter.numel() for _parameter in model.parameters())
                 print(f"--> Model created with {totalParameters} parameters")
                 
@@ -1070,7 +1177,8 @@ def main():
                 print("\nStep 5: Training model...")
                 history = trainModel(model, XtrainData, yTrainData, XtestData, yTestData,
                                     _epochs=CONFIG["EPOCHS"], 
-                                    _learningRate=CONFIG["LEARNING_RATE"])
+                                    _learningRate=CONFIG["LEARNING_RATE"],
+                                    _batchSize=CONFIG["BATCH_SIZE"])
                 
                 #6. Evaluate 
                 print("\nStep 6: Evaluating the model...")
