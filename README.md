@@ -52,10 +52,24 @@ trades = fetchCryptoTradesChunked("BTC/USD", start, end)
 ofi = aggregateOrderFlowToBars(trades, barStarts, barEnds)
 
 # 3. Train ML model
-from pricePredictorWithOFI import PricePredictor, trainModel
+from pricePredictorWithOFI import PricePredictorLSTM, PricePredictor, createFeaturesAndLabels, trainTestSplit, trainModel
 
-model = PricePredictor(input_features=128)
-history = trainModel(model, features, labels, epochs=1000)
+# Build features and labels
+features, labels = createFeaturesAndLabels(
+    closes, _openPrices=opens, _highPrices=highs, _lowPrices=lows,
+    _volumes=volumes, _orderFlowImbalance=ofi, _lookback=30
+)
+
+# Split chronologically (no shuffling)
+Xtrain, Xtest, yTrain, yTest = trainTestSplit(features, labels)
+
+# Feedforward baseline
+model = PricePredictor(_inputSize=128)
+
+# LSTM model (sequence-aware)
+model = PricePredictorLSTM(_numberFeatures=7, _lookback=30)
+
+history = trainModel(model, Xtrain, yTrain, Xtest, yTest, _epochs=1000, _batchSize=32)
 ```
 
 &nbsp;
@@ -119,9 +133,13 @@ Full supervised ML pipeline:
 7. Evaluate with accuracy, precision, recall, F1, confusion matrix
 8. Plot training history (loss + accuracy curves)
 
-### pricePredictorWithOFI.py — Neural network with OFI features
-Same architecture as stockPredictor.py but uses OFI-enriched dollar bars as input.
+### pricePredictorWithOFI.py — Neural network + LSTM with OFI features
+Extends stockPredictor.py with two model options and OFI-enriched dollar bars as input.
 Adds order flow imbalance as a feature alongside returns, volatility, and RSI.
+
+- `PricePredictor` — feedforward baseline (3-layer MLP)
+- `PricePredictorLSTM` — stacked LSTM (2 layers, hidden=64) + classifier head; processes feature windows as sequences (batch, lookback, features) to capture temporal patterns that the feedforward model cannot
+- `trainModel` — mini-batch training via DataLoader with shuffling, epoch-averaged loss/accuracy, and early stopping on test loss (`patience=15`) with best-weight restore
 
 ### main.py — Entry point
 Wires together the pipeline components.
@@ -144,7 +162,7 @@ dollarBarsRefactoredFull.py  →  dollarBarsWithOFI.py
 (production-ready)           →  (+ OFI features)
 ↓
 orderFlow.py (OFI calculation) ────────────→  pricePredictorWithOFI.py
-(ML model — OFI enhanced)
+                                              (ML model - feedforward baseline + LSTM — OFI enhanced)
 ```
 
 ### Data Flow
@@ -156,9 +174,12 @@ orderFlow.py (OFI calculation) ────────────→  pricePre
                     ↓
 3. Order Flow Imbalance (buy/sell pressure)
                     ↓
-4. Feature Engineering (returns, volatility, RSI, OFI)
+4. Feature Engineering (returns, volatility, RSI, MA deviation, OFI)
                     ↓
-5. Neural Network (price direction prediction)
+5. Neural Network — feedforward (PricePredictor)
+                  — LSTM sequence model (PricePredictorLSTM)
+                    ↓
+6. Binary classification (next bar up/down)
 ```
 
 ## Implementation Approach
@@ -169,6 +190,7 @@ Built progressively to understand each concept deeply:
 2. **Dollar bars** → Information-based sampling (Lopez de Prado)
 3. **Order flow** → Calculate buy/sell pressure per bar
 4. **ML pipeline** → Neural network prediction (baseline vs OFI-enhanced)
+5. **Long Short Term Memory (LSTM)** → Sequence-aware model capturing temporal patterns across lookback window
 
 **Development Process:**  
 Each concept implemented progressively: prototype → refactored → production-ready with comprehensive docstrings and error handling.
@@ -215,11 +237,13 @@ python main.py
 - **Value:** Shows WHO is driving price movement, not just WHAT happened
 
 ### ML Model
-- **Architecture:** 3-layer neural network (64→32→1 neurons)
-- **Features:** Returns, volatility, RSI, MA deviation, OFI
-- **Task:** Binary classification (next candle up/down)
-- **Baseline accuracy:** ~51-52% (price features only)
-- **With OFI:** [Experimental] (order flow features added)
+- **Feedforward (`PricePredictor`):** 3-layer neural network (64→32→1 neurons)
+- **LSTM (`PricePredictorLSTM`):** 2-layer stacked LSTM (hidden=64) + classifier head (32→1)
+- **Training:** Mini-batch gradient descent (batch=32, shuffled) + early stopping (patience=15)
+- **Features:** Returns, volatility, RSI, MA deviation, OFI (up to 7 feature arrays)
+- **Task:** Binary classification (next candle"bar" up/down)
+- **Baseline accuracy:** ~51-52% (price features only, feedforward)
+- **With OFI + LSTM:** [Experimental] (sequence + order flow features)
 - **Evaluation:** Accuracy, precision, recall, F1, confusion matrix
 
 ## Future Improvements - Aspiring to 
