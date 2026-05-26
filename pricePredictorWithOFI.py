@@ -421,6 +421,10 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                                                                           (adds intraBarMomentum,
                                                                           barRange, vwapDeviation)
         USE_ORDER_FLOW_IMBALANCE=True + _orderFlowImbalance provided    → _lookback * 7 columns
+        USE_LONGTERM_CONTEXT=True                                       → _lookback * 8 columns
+                                                                          (adds price relative to
+                                                                          200-period MA; sets
+                                                                          validStartIndex to 200)
 
     Args:
         _closePrices         (list):           List of close prices. Required.
@@ -441,7 +445,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     Returns:
         tuple:
             - features (numpy.ndarray): Shape (N, _lookback * F) — each row is a return window. Where F is the
-                                        number of active feature arrays (3–7,
+                                        number of active feature arrays (3–8,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
             - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
@@ -449,16 +453,18 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
-                    "USE_ORDER_FLOW_IMBALANCE", or "LOOKBACK" keys.
+                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
         ValueError: If _closePrices has fewer elements than validStartIndex + _lookback + 1
-                    (not enough data to produce even one sample — features and
-                    labels will both be empty arrays).
+                    (not enough data to produce even one sample — features and labels will
+                    both be empty arrays). Most likely when USE_LONGTERM_CONTEXT=True
+                    forces validStartIndex=200 on a short dataset.
 
     Example:
-        >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, USE_ORDER_FLOW_IMBALANCE=False
+        >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, 
+        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
