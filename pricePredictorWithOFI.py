@@ -1188,7 +1188,7 @@ def main():
         else:   #CONFIG["BAR_MODE"] == "time_bars" 
             time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
             
-        for lookback in [8]: #[16, 8]: #[16, 12, 8]: #[34, 32, 30, 20, 16]:
+        for lookback in [32]: #[8]: #[16, 8]: #[16, 12, 8]: #[34, 32, 30, 20, 16]:
             CONFIG["LOOKBACK"] = lookback
             print(f"    LOOKBACK: {lookback}\n")
                 
