@@ -483,7 +483,6 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     useLongTermContext = CONFIG.get("USE_LONGTERM_CONTEXT", False)
     if useLongTermContext:
         longTermMovingAverage = calculatePriceRelativeToMA(_closePrices, _window=200)
-        longTermMovingAverage100 = calculatePriceRelativeToMA(_closePrices, _window=100)
         
     #Align all arrays - RSI is based on prices (length N),
     #returns/volatility are length N-1. Trim RSI to match.
@@ -501,7 +500,6 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     
     if useLongTermContext:
         longTermMovingAverage = longTermMovingAverage[1:]
-        longTermMovingAverage100 = longTermMovingAverage100[1:]
     
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
@@ -534,7 +532,6 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         
     if useLongTermContext:
         longTermMovingAverage = longTermMovingAverage[validStartIndex:]
-        longTermMovingAverage100 = longTermMovingAverage100[validStartIndex:]
     
     features = []
     labels = []
@@ -575,7 +572,6 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
             
         if useLongTermContext:
             featureParts.append(longTermMovingAverage[i - _lookback:i])
-            featureParts.append(longTermMovingAverage100[i - _lookback:i])
         
         window = numpy.concatenate(featureParts)
         
