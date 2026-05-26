@@ -25,7 +25,7 @@ import random
 #Configuration 
 #-------------------------------
 BASE_CONFIG = {
-    "SYMBOL": "BTC/USD",
+    "SYMBOL": "ETH/USD", #"BTC/USD",
     "LOOKBACK": 32,                         #Use last <30> candles for prediction 
     "TRAIN_SPLIT": 0.8,                     #80% training data, 20% test data 
     "EPOCHS": 1000,                          #<100> Iterations
@@ -36,7 +36,8 @@ BASE_CONFIG = {
     "USE_VOLUME_FEATURES": True,            #Toggle on/off: intra-bar momentum, bar range, volume ratio, VWAP deviation 
     "USE_ORDER_FLOW_IMBALANCE": True,       #Toggel on/off: Order flow imbalance 
     "MODEL": "lstm",                        #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
-    "USE_LONGTERM_CONTEXT": True            #Price relative to 200-bar Moving Average (MA) (long-term trend context)
+    "USE_LONGTERM_CONTEXT": True,           #Price relative to 200-bar Moving Average (MA) (long-term trend context)
+    "USE_ADX": True                         #Trend strength (0-100, >25 = trending)
 }
 
 TIME_BARS_CONFIG = {
@@ -403,6 +404,51 @@ def calculateVWAPDeviation(_highs, _lows, _closes, _dollarVolumes, _window=20):
         
     return deviation
 
+def calculateADX(_highs, _lows, _closes, _window=14):
+    """
+    ...
+    """
+    highs = numpy.array(_highs)
+    lows = numpy.array(_lows)
+    closes = numpy.array(_closes)
+    
+    #True Range: largest of (high-low), |high-previousClose|, |low-previousClose|
+    trueRange = numpy.maximum(
+        highs[1:] - lows[1:],
+        numpy.maximum(
+            numpy.abs(highs[1:] - closes[:-1]),
+            numpy.abs(lows[1:] - closes[:-1])
+        )
+    )
+    
+    #Directional Movement 
+    upMove = highs[1:] - highs[:-1]
+    downMove = lows[:-1] - lows[1:]
+    
+    plusDirectionalMovement = numpy.where( (upMove > downMove) & (upMove > 0), upMove, 0.0 )
+    minusDirectionalMovement = numpy.where( (downMove > upMove) & (downMove > 0), downMove, 0.0 )
+    
+    #Smooth True Range (TR), plus directional movement (+DM), minus directional movement (-DM) with rolling mean "moving average"
+    kernel = numpy.ones(_window) / _window
+    smoothedTrueRange = numpy.convolve(trueRange, kernel, mode="full")[:len(trueRange)]
+    smoothedPlusDirectionalMovement = numpy.convolve(plusDirectionalMovement, kernel, mode="full")[:len(plusDirectionalMovement)]
+    smoothedMinusDirectionalMovement = numpy.convolve(minusDirectionalMovement, kernel, mode="full")[:len(minusDirectionalMovement)]
+    
+    #plus Directional Indicator (+DI) and minus Directional Indicator (-DI)
+    with numpy.errstate(divide="ignore", invalid="ignore"):
+        plusDirectionalIndicator = numpy.where(smoothedTrueRange > 0, 100*smoothedPlusDirectionalMovement/smoothedTrueRange, 0.0)
+        minusDirectionalIndicator = numpy.where(smoothedTrueRange > 0, 100*smoothedMinusDirectionalMovement/smoothedTrueRange, 0.0)
+        
+        directionalSum = plusDirectionalIndicator + minusDirectionalIndicator
+        directionalIndex = numpy.where(directionalSum > 0, 100*numpy.abs(plusDirectionalIndicator-minusDirectionalIndicator)/directionalSum, 0.0)
+        
+    #Average Directional Index (ADX) = smoothed Directional Index (DX)
+    averageDirectionalIndex = numpy.convolve(directionalIndex, kernel, mode="full")[:len(directionalIndex)] 
+    averageDirectionalIndex[:2*_window-2] = numpy.nan
+    
+    #Pad front to match input length N
+    return numpy.concatenate([ [numpy.nan], averageDirectionalIndex ])
+    
 
 def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _lowPrices=None, _volumes=None, _orderFlowImbalance=None, _lookback=30): 
     """
@@ -490,6 +536,10 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     if useLongTermContext:
         longTermMovingAverage = calculatePriceRelativeToMA(_closePrices, _window=200)
         
+    useAverageDirectionalIndex = CONFIG.get("USE_ADX", False) and _highPrices is not None and _lowPrices is not None
+    if useAverageDirectionalIndex:
+        averageDirectionalIndex = calculateADX(_highPrices, _lowPrices, _closePrices, _window=14)
+    
     #Align all arrays - RSI is based on prices (length N),
     #returns/volatility are length N-1. Trim RSI to match.
     #Align to returns/priceRelativeToMA length (N-1)
@@ -506,6 +556,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     
     if useLongTermContext:
         longTermMovingAverage = longTermMovingAverage[1:]
+        
+    if useAverageDirectionalIndex:
+        averageDirectionalIndex = averageDirectionalIndex[1:]
     
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
@@ -538,6 +591,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         
     if useLongTermContext:
         longTermMovingAverage = longTermMovingAverage[validStartIndex:]
+    
+    if useAverageDirectionalIndex:
+        averageDirectionalIndex = averageDirectionalIndex[validStartIndex:]
     
     features = []
     labels = []
@@ -578,6 +634,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
             
         if useLongTermContext:
             featureParts.append(longTermMovingAverage[i - _lookback:i])
+            
+        if useAverageDirectionalIndex: 
+            featureParts.append(averageDirectionalIndex[i - _lookback:i])
         
         window = numpy.concatenate(featureParts)
         
@@ -1121,7 +1180,7 @@ def main():
     
         orderFlowImbalance = None 
         if CONFIG["BAR_MODE"] == "dollar_bars":
-            timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
+            timeBars = formatBarsToDictionaryList(bars, CONFIG["SYMBOL"])
             dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
             barStart, time, openPrice, highPrice, lowPrice, closePrice, dollarVolume, orderFlowImbalanceList = formatDollarBarsToList(dollarBars)
             if CONFIG["USE_ORDER_FLOW_IMBALANCE"]: 
