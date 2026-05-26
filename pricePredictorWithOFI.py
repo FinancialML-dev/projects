@@ -35,7 +35,8 @@ BASE_CONFIG = {
     "USE_PRICE_RELATIVE_TO_MA": True,       #Toggle on/off
     "USE_VOLUME_FEATURES": True,            #Toggle on/off: intra-bar momentum, bar range, volume ratio, VWAP deviation 
     "USE_ORDER_FLOW_IMBALANCE": True,       #Toggel on/off: Order flow imbalance 
-    "MODEL": "lstm"                         #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
+    "MODEL": "lstm",                        #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
+    "USE_LONGTERM_CONTEXT": True            #Price relative to 200-bar Moving Average (MA) (long-term trend context)
 }
 
 TIME_BARS_CONFIG = {
@@ -420,6 +421,10 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                                                                           (adds intraBarMomentum,
                                                                           barRange, vwapDeviation)
         USE_ORDER_FLOW_IMBALANCE=True + _orderFlowImbalance provided    → _lookback * 7 columns
+        USE_LONGTERM_CONTEXT=True                                       → _lookback * 8 columns
+                                                                          (adds price relative to
+                                                                          200-period MA; sets
+                                                                          validStartIndex to 200)
 
     Args:
         _closePrices         (list):           List of close prices. Required.
@@ -440,7 +445,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     Returns:
         tuple:
             - features (numpy.ndarray): Shape (N, _lookback * F) — each row is a return window. Where F is the
-                                        number of active feature arrays (3–7,
+                                        number of active feature arrays (3–8,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
             - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
@@ -448,16 +453,18 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
-                    "USE_ORDER_FLOW_IMBALANCE", or "LOOKBACK" keys.
+                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
         ValueError: If _closePrices has fewer elements than validStartIndex + _lookback + 1
-                    (not enough data to produce even one sample — features and
-                    labels will both be empty arrays).
+                    (not enough data to produce even one sample — features and labels will
+                    both be empty arrays). Most likely when USE_LONGTERM_CONTEXT=True
+                    forces validStartIndex=200 on a short dataset.
 
     Example:
-        >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, USE_ORDER_FLOW_IMBALANCE=False
+        >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, 
+        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
@@ -478,6 +485,10 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         
     if useOrderFlowImbalance:
         orderFlowImbalance = numpy.array(_orderFlowImbalance)
+    
+    useLongTermContext = CONFIG.get("USE_LONGTERM_CONTEXT", False)
+    if useLongTermContext:
+        longTermMovingAverage = calculatePriceRelativeToMA(_closePrices, _window=200)
         
     #Align all arrays - RSI is based on prices (length N),
     #returns/volatility are length N-1. Trim RSI to match.
@@ -489,8 +500,12 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         barRange = barRange[1:]
         volumeRatio = volumeRatio[1:]
         vwapDeviation = vwapDeviation[1:]
+    
     if useOrderFlowImbalance:
         orderFlowImbalance = orderFlowImbalance[1:]
+    
+    if useLongTermContext:
+        longTermMovingAverage = longTermMovingAverage[1:]
     
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
@@ -502,6 +517,8 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         nanWindow = max(nanWindow, 20)
     if useVolumeFeatures:
         nanWindow = max(nanWindow, 20)      #VWAP window = 20
+    if useLongTermContext:
+        nanWindow = max(nanWindow, 200)
     
     validStartIndex = max(nanWindow, CONFIG["LOOKBACK"])
     
@@ -518,6 +535,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     
     if useOrderFlowImbalance:
         orderFlowImbalance = orderFlowImbalance[validStartIndex:]
+        
+    if useLongTermContext:
+        longTermMovingAverage = longTermMovingAverage[validStartIndex:]
     
     features = []
     labels = []
@@ -555,6 +575,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         
         if useOrderFlowImbalance: 
             featureParts.append(orderFlowImbalance[i - _lookback:i])
+            
+        if useLongTermContext:
+            featureParts.append(longTermMovingAverage[i - _lookback:i])
         
         window = numpy.concatenate(featureParts)
         
