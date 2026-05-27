@@ -27,7 +27,10 @@ Built as self-directed learning project implementing Lopez de Prado's
 
 &nbsp;
 
-## Quick Start
+<details>
+<summary> Quick Start version 1 </summary> 
+
+## Quick Start version 1
 
 ```python
 # 1. Fetch and create dollar bars
@@ -70,6 +73,58 @@ model = PricePredictor(_inputSize=128)
 model = PricePredictorLSTM(_numberFeatures=7, _lookback=30)
 
 history = trainModel(model, Xtrain, yTrain, Xtest, yTest, _epochs=1000, _batchSize=32)
+
+# Inspect results
+print(f"Accuracy: {history['accuracy']:.3f}")
+print(f"F1 Score: {history['f1']:.3f}")
+```
+
+</details>
+
+&nbsp;
+
+## Quick Start 
+
+```python
+# 1. Fetch and create dollar bars with built-in OFI
+from dollarBarsWithOFI import fetchCryptoData, createDollarBars, formatDollarBarsToList
+from datetime import datetime
+from alpaca.data.timeframe import TimeFrame
+
+# Fetch time bars
+bars = fetchCryptoData("BTC/USD", TimeFrame.Day, datetime(2026, 3, 1), datetime(2026, 4, 1))
+timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
+
+# Create dollar bars (OFI computed per bar)
+dollarBars = createDollarBars(timeBars, _dollarThreshold=500_000)
+
+# Format for ML — 8 return values including OFI
+barStarts, times, opens, highs, lows, closes, volumes, ofi = formatDollarBarsToList(dollarBars)
+
+# 2. Train ML model
+from pricePredictorWithOFI import PricePredictorLSTM, PricePredictor, createFeaturesAndLabels, trainTestSplit, trainModel, evaluateModel
+
+# Build features and labels (9 feature arrays: returns, vol, RSI, MA20, momentum, barRange, VWAP, OFI, MA200, ADX)
+features, labels = createFeaturesAndLabels(
+    closes, _openPrices=opens, _highPrices=highs, _lowPrices=lows,
+    _volumes=volumes, _orderFlowImbalance=ofi, _lookback=30
+)
+
+# Split chronologically (no shuffling)
+Xtrain, Xtest, yTrain, yTest = trainTestSplit(features, labels)
+
+# Feedforward baseline
+model = PricePredictor(_inputSize=270)      # 9 features * lookback 30
+
+# LSTM model (sequence-aware)
+model = PricePredictorLSTM(_numberFeatures=9, _lookback=30)
+
+history = trainModel(model, Xtrain, yTrain, Xtest, yTest, _epochs=1000, _batchSize=32)
+
+# Evaluate on test set
+results = evaluateModel(model, Xtest, yTest)
+print(f"Accuracy: {results['accuracy']:.4f}")
+print(f"F1 Score: {results['f1']:.4f}")
 ```
 
 &nbsp;
@@ -245,7 +300,7 @@ python main.py
 - **Training:** Mini-batch gradient descent (batch=32, shuffled) + early stopping (patience=15)
 - **Features (up to 9 arrays):** Returns, volatility, RSI, MA(20) deviation, intra-bar momentum,
   bar range, VWAP deviation, OFI, MA(200) long-term context, ADX trend strength
-- **Task:** Binary classification (next candle"bar" up/down)
+- **Task:** Binary classification (next candle-bar up/down)
 - **Baseline accuracy:** ~51-52% (price features only, feedforward)
 - **Best result:** ~52.4% mean (LSTM + 200MA + ADX, BTC/USD $25K threshold)
 - **ETH/USD:** ~52.9-53.0% mean (LSTM + 200MA + ADX, $25K threshold)
