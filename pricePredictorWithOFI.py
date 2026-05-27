@@ -25,7 +25,7 @@ import random
 #Configuration 
 #-------------------------------
 BASE_CONFIG = {
-    "SYMBOL": "BTC/USD",
+    "SYMBOL": "ETH/USD", #"BTC/USD",
     "LOOKBACK": 32,                         #Use last <30> candles for prediction 
     "TRAIN_SPLIT": 0.8,                     #80% training data, 20% test data 
     "EPOCHS": 1000,                          #<100> Iterations
@@ -36,7 +36,8 @@ BASE_CONFIG = {
     "USE_VOLUME_FEATURES": True,            #Toggle on/off: intra-bar momentum, bar range, volume ratio, VWAP deviation 
     "USE_ORDER_FLOW_IMBALANCE": True,       #Toggel on/off: Order flow imbalance 
     "MODEL": "lstm",                        #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
-    "USE_LONGTERM_CONTEXT": True            #Price relative to 200-bar Moving Average (MA) (long-term trend context)
+    "USE_LONGTERM_CONTEXT": True,           #Price relative to 200-bar Moving Average (MA) (long-term trend context)
+    "USE_ADX": True                         #Trend strength (0-100, >25 = trending)
 }
 
 TIME_BARS_CONFIG = {
@@ -403,6 +404,101 @@ def calculateVWAPDeviation(_highs, _lows, _closes, _dollarVolumes, _window=20):
         
     return deviation
 
+def calculateADX(_highs, _lows, _closes, _window=14):
+    """
+    Calculate the Average Directional Index (ADX) — measures trend strength,
+    not direction. High ADX = strong trend (up or down). Low ADX = ranging market.
+
+    Algorithm:
+        1. True Range (TR)  = max(high-low, |high-prevClose|, |low-prevClose|)
+        2. +DM / -DM        = upward / downward directional movement per bar
+        3. Smooth TR, +DM, -DM with a rolling mean of _window bars
+        4. +DI / -DI        = 100 * smoothed±DM / smoothedTR
+        5. DX               = 100 * |+DI - -DI| / (+DI + -DI)
+        6. ADX              = rolling mean of DX over _window bars
+
+    Average Directional Index (ADX) interpretation:
+        < 20  → ranging / weak trend
+        25–50 → trending (strong signal)
+        > 50  → very strong trend (rare)
+        example
+        ADX > 25: trending  |  ADX < 20: ranging  |  range: [0, 100]
+
+    Args:
+        _highs   (list): Bar high prices. Length N.
+        _lows    (list): Bar low prices. Length N.
+        _closes  (list): Bar close prices. Length N.
+                        All three must be the same length.
+        _window  (int, optional): Smoothing window for TR, DM, and DX. Defaults to 14.
+
+    Returns:
+        numpy.ndarray: ADX values of length N -> len(_closes).
+                    First (2 * _window - 1) values are NaN — warmup period
+                    for two rounds of smoothing. First element is always NaN
+                    (True Range requires a previous close).
+
+    Raises:
+        ValueError: If _highs, _lows, and _closes are different lengths —
+                    the directional movement arrays will be misaligned and
+                    numpy operations will raise a shape mismatch.
+        TypeError:  If any input contains non-numeric values —
+                    numpy.array() conversion will succeed but arithmetic
+                    operations will raise.
+
+    Example:
+        >>> highs  = [44, 45, 46, 44, 43, 45, 47, 48, 47, 46, 48, 49, 50, 49, 48,
+        ...           50, 51, 52, 51, 50, 52, 53, 54, 53, 52, 54, 55, 56, 55, 54]
+        >>> lows   = [42, 43, 44, 42, 41, 43, 45, 46, 45, 44, 46, 47, 48, 47, 46,
+        ...           48, 49, 50, 49, 48, 50, 51, 52, 51, 50, 52, 53, 54, 53, 52]
+        >>> closes = [43, 44, 45, 43, 42, 44, 46, 47, 46, 45, 47, 48, 49, 48, 47,
+        ...           49, 50, 51, 50, 49, 51, 52, 53, 52, 51, 53, 54, 55, 54, 53]
+        >>> adx = calculateADX(highs, lows, closes, _window=14)
+        >>> print(adx[27])      # first valid value (2 * 14 - 1 = 27)
+        32.4                    # strong trend at that bar
+        >>> print(numpy.isnan(adx[0]))
+        True
+    """
+    highs = numpy.array(_highs)
+    lows = numpy.array(_lows)
+    closes = numpy.array(_closes)
+    
+    #True Range: largest of (high-low), |high-previousClose|, |low-previousClose|
+    trueRange = numpy.maximum(
+        highs[1:] - lows[1:],
+        numpy.maximum(
+            numpy.abs(highs[1:] - closes[:-1]),
+            numpy.abs(lows[1:] - closes[:-1])
+        )
+    )
+    
+    #Directional Movement 
+    upMove = highs[1:] - highs[:-1]
+    downMove = lows[:-1] - lows[1:]
+    
+    plusDirectionalMovement = numpy.where( (upMove > downMove) & (upMove > 0), upMove, 0.0 )
+    minusDirectionalMovement = numpy.where( (downMove > upMove) & (downMove > 0), downMove, 0.0 )
+    
+    #Smooth True Range (TR), plus directional movement (+DM), minus directional movement (-DM) with rolling mean "moving average"
+    kernel = numpy.ones(_window) / _window
+    smoothedTrueRange = numpy.convolve(trueRange, kernel, mode="full")[:len(trueRange)]
+    smoothedPlusDirectionalMovement = numpy.convolve(plusDirectionalMovement, kernel, mode="full")[:len(plusDirectionalMovement)]
+    smoothedMinusDirectionalMovement = numpy.convolve(minusDirectionalMovement, kernel, mode="full")[:len(minusDirectionalMovement)]
+    
+    #plus Directional Indicator (+DI) and minus Directional Indicator (-DI)
+    with numpy.errstate(divide="ignore", invalid="ignore"):
+        plusDirectionalIndicator = numpy.where(smoothedTrueRange > 0, 100*smoothedPlusDirectionalMovement/smoothedTrueRange, 0.0)
+        minusDirectionalIndicator = numpy.where(smoothedTrueRange > 0, 100*smoothedMinusDirectionalMovement/smoothedTrueRange, 0.0)
+        
+        directionalSum = plusDirectionalIndicator + minusDirectionalIndicator
+        directionalIndex = numpy.where(directionalSum > 0, 100*numpy.abs(plusDirectionalIndicator-minusDirectionalIndicator)/directionalSum, 0.0)
+        
+    #Average Directional Index (ADX) = smoothed Directional Index (DX)
+    averageDirectionalIndex = numpy.convolve(directionalIndex, kernel, mode="full")[:len(directionalIndex)] 
+    averageDirectionalIndex[:2*_window-2] = numpy.nan
+    
+    #Pad front to match input length N
+    return numpy.concatenate([ [numpy.nan], averageDirectionalIndex ])
+    
 
 def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _lowPrices=None, _volumes=None, _orderFlowImbalance=None, _lookback=30): 
     """
@@ -425,15 +521,19 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                                                                           (adds price relative to
                                                                           200-period MA; sets
                                                                           validStartIndex to 200)
+        USE_ADX=True + _highPrices and _lowPrices provided              → _lookback * 9 columns
+                                                                          (adds ADX trend strength;
+                                                                           warmup ~27 bars, covered
+                                                                           by nanWindow=200)
 
     Args:
         _closePrices         (list):           List of close prices. Required.
         _openPrices          (list, optional): List of open prices. Required when
                                                USE_VOLUME_FEATURES is True.
         _highPrices          (list, optional): List of high prices. Required when
-                                               USE_VOLUME_FEATURES is True.
+                                               USE_VOLUME_FEATURES or USE_ADX is True.
         _lowPrices           (list, optional): List of low prices. Required when
-                                               USE_VOLUME_FEATURES is True.
+                                               USE_VOLUME_FEATURES or USE_ADX is True.
         _volumes             (list, optional): List of dollar volumes. Required when
                                                USE_VOLUME_FEATURES is True.
         _orderFlowImbalance  (list, optional): List of OFI values per bar. Required when
@@ -445,7 +545,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     Returns:
         tuple:
             - features (numpy.ndarray): Shape (N, _lookback * F) — each row is a return window. Where F is the
-                                        number of active feature arrays (3–8,
+                                        number of active feature arrays (3–9,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
             - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
@@ -453,7 +553,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
-                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", or "LOOKBACK" keys.
+                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", "USE_ADX", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
@@ -464,7 +564,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Example:
         >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, 
-        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False
+        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False, USE_ADX=False
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
@@ -490,6 +590,10 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     if useLongTermContext:
         longTermMovingAverage = calculatePriceRelativeToMA(_closePrices, _window=200)
         
+    useAverageDirectionalIndex = CONFIG.get("USE_ADX", False) and _highPrices is not None and _lowPrices is not None
+    if useAverageDirectionalIndex:
+        averageDirectionalIndex = calculateADX(_highPrices, _lowPrices, _closePrices, _window=14)
+    
     #Align all arrays - RSI is based on prices (length N),
     #returns/volatility are length N-1. Trim RSI to match.
     #Align to returns/priceRelativeToMA length (N-1)
@@ -506,6 +610,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     
     if useLongTermContext:
         longTermMovingAverage = longTermMovingAverage[1:]
+        
+    if useAverageDirectionalIndex:
+        averageDirectionalIndex = averageDirectionalIndex[1:]
     
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
@@ -538,6 +645,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         
     if useLongTermContext:
         longTermMovingAverage = longTermMovingAverage[validStartIndex:]
+    
+    if useAverageDirectionalIndex:
+        averageDirectionalIndex = averageDirectionalIndex[validStartIndex:]
     
     features = []
     labels = []
@@ -578,6 +688,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
             
         if useLongTermContext:
             featureParts.append(longTermMovingAverage[i - _lookback:i])
+            
+        if useAverageDirectionalIndex: 
+            featureParts.append(averageDirectionalIndex[i - _lookback:i])
         
         window = numpy.concatenate(featureParts)
         
@@ -1121,7 +1234,7 @@ def main():
     
         orderFlowImbalance = None 
         if CONFIG["BAR_MODE"] == "dollar_bars":
-            timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
+            timeBars = formatBarsToDictionaryList(bars, CONFIG["SYMBOL"])
             dollarBars = createDollarBars(timeBars, CONFIG["DOLLAR_THRESHOLD"])
             barStart, time, openPrice, highPrice, lowPrice, closePrice, dollarVolume, orderFlowImbalanceList = formatDollarBarsToList(dollarBars)
             if CONFIG["USE_ORDER_FLOW_IMBALANCE"]: 
@@ -1129,7 +1242,7 @@ def main():
         else:   #CONFIG["BAR_MODE"] == "time_bars" 
             time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
             
-        for lookback in [8]: #[16, 8]: #[16, 12, 8]: #[34, 32, 30, 20, 16]:
+        for lookback in [32]: #[8]: #[16, 8]: #[16, 12, 8]: #[34, 32, 30, 20, 16]:
             CONFIG["LOOKBACK"] = lookback
             print(f"    LOOKBACK: {lookback}\n")
                 
