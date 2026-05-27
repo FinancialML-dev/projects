@@ -27,6 +27,13 @@ Built as self-directed learning project implementing Lopez de Prado's
 
 &nbsp;
 
+## Quick Start
+
+Two versions below:
+
+**Quick Start (Recommended)** — simplified, uses pre-built `dollarBarsWithOFI` module  
+**Quick Start version 1** — detailed, step-by-step with separate modules (see details)
+
 <details>
 <summary> Quick Start version 1 </summary> 
 
@@ -34,16 +41,19 @@ Built as self-directed learning project implementing Lopez de Prado's
 
 ```python
 # 1. Fetch and create dollar bars
-from dollarBarsRefactoredFull import fetchCryptoData, createDollarBars, formatDollarBarsToLists
+from dollarBarsRefactoredFull import fetchCryptoData, createDollarBars, formatDollarBarsToList
 from datetime import datetime
 from alpaca.data.timeframe import TimeFrame
 
+start = datetime(2025, 5, 1)
+end   = datetime(2026, 4, 1)
+
 # Fetch time bars
-bars = fetchCryptoData("BTC/USD", TimeFrame.Day, datetime(2026, 3, 1), datetime(2026, 4, 1))
+bars = fetchCryptoData("BTC/USD", TimeFrame.Day, start, end)
 timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
 
 # Create dollar bars
-dollarBars = createDollarBars(timeBars, threshold=500_000)
+dollarBars = createDollarBars(timeBars, _dollarThreshold=25_000)
 
 # Format for ML
 dates, opens, highs, lows, closes, volumes = formatDollarBarsToList(dollarBars)
@@ -67,36 +77,36 @@ features, labels = createFeaturesAndLabels(
 Xtrain, Xtest, yTrain, yTest = trainTestSplit(features, labels)
 
 # Feedforward baseline
-model = PricePredictor(_inputSize=128)
+model = PricePredictor(_inputSize=300) # 10 features * lookback 30
 
 # LSTM model (sequence-aware)
-model = PricePredictorLSTM(_numberFeatures=7, _lookback=30)
+model = PricePredictorLSTM(_numberFeatures=10, _lookback=30)
 
 history = trainModel(model, Xtrain, yTrain, Xtest, yTest, _epochs=1000, _batchSize=32)
 
 # Inspect results
-print(f"Accuracy: {history['accuracy']:.3f}")
-print(f"F1 Score: {history['f1']:.3f}")
+print(f"Accuracy: {history['accuracy'][-1]:.3f}")
+print(f"Loss:     {history['loss'][-1]:.3f}")
 ```
 
 </details>
 
 &nbsp;
 
-## Quick Start 
+### Quick Start (Recommended)
 
 ```python
 # 1. Fetch and create dollar bars with built-in OFI
-from dollarBarsWithOFI import fetchCryptoData, createDollarBars, formatDollarBarsToList
+from dollarBarsWithOFI import fetchCryptoData, createDollarBars, formatDollarBarsToList, formatBarsToDictionaryList
 from datetime import datetime
 from alpaca.data.timeframe import TimeFrame
 
 # Fetch time bars
-bars = fetchCryptoData("BTC/USD", TimeFrame.Day, datetime(2026, 3, 1), datetime(2026, 4, 1))
+bars = fetchCryptoData("BTC/USD", TimeFrame.Day, datetime(2025, 1, 1), datetime(2026, 4, 1))
 timeBars = formatBarsToDictionaryList(bars, "BTC/USD")
 
 # Create dollar bars (OFI computed per bar)
-dollarBars = createDollarBars(timeBars, _dollarThreshold=500_000)
+dollarBars = createDollarBars(timeBars, _dollarThreshold=25_000)
 
 # Format for ML — 8 return values including OFI
 barStarts, times, opens, highs, lows, closes, volumes, ofi = formatDollarBarsToList(dollarBars)
@@ -114,10 +124,10 @@ features, labels = createFeaturesAndLabels(
 Xtrain, Xtest, yTrain, yTest = trainTestSplit(features, labels)
 
 # Feedforward baseline
-model = PricePredictor(_inputSize=270)      # 9 features * lookback 30
+model = PricePredictor(_inputSize=300)      # 10 features * lookback 30
 
 # LSTM model (sequence-aware)
-model = PricePredictorLSTM(_numberFeatures=9, _lookback=30)
+model = PricePredictorLSTM(_numberFeatures=10, _lookback=30)
 
 history = trainModel(model, Xtrain, yTrain, Xtest, yTest, _epochs=1000, _batchSize=32)
 
