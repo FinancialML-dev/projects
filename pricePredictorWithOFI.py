@@ -406,7 +406,57 @@ def calculateVWAPDeviation(_highs, _lows, _closes, _dollarVolumes, _window=20):
 
 def calculateADX(_highs, _lows, _closes, _window=14):
     """
-    ...
+    Calculate the Average Directional Index (ADX) — measures trend strength,
+    not direction. High ADX = strong trend (up or down). Low ADX = ranging market.
+
+    Algorithm:
+        1. True Range (TR)  = max(high-low, |high-prevClose|, |low-prevClose|)
+        2. +DM / -DM        = upward / downward directional movement per bar
+        3. Smooth TR, +DM, -DM with a rolling mean of _window bars
+        4. +DI / -DI        = 100 * smoothed±DM / smoothedTR
+        5. DX               = 100 * |+DI - -DI| / (+DI + -DI)
+        6. ADX              = rolling mean of DX over _window bars
+
+    Average Directional Index (ADX) interpretation:
+        < 20  → ranging / weak trend
+        25–50 → trending (strong signal)
+        > 50  → very strong trend (rare)
+        example
+        ADX > 25: trending  |  ADX < 20: ranging  |  range: [0, 100]
+
+    Args:
+        _highs   (list): Bar high prices. Length N.
+        _lows    (list): Bar low prices. Length N.
+        _closes  (list): Bar close prices. Length N.
+                        All three must be the same length.
+        _window  (int, optional): Smoothing window for TR, DM, and DX. Defaults to 14.
+
+    Returns:
+        numpy.ndarray: ADX values of length N -> len(_closes).
+                    First (2 * _window - 1) values are NaN — warmup period
+                    for two rounds of smoothing. First element is always NaN
+                    (True Range requires a previous close).
+
+    Raises:
+        ValueError: If _highs, _lows, and _closes are different lengths —
+                    the directional movement arrays will be misaligned and
+                    numpy operations will raise a shape mismatch.
+        TypeError:  If any input contains non-numeric values —
+                    numpy.array() conversion will succeed but arithmetic
+                    operations will raise.
+
+    Example:
+        >>> highs  = [44, 45, 46, 44, 43, 45, 47, 48, 47, 46, 48, 49, 50, 49, 48,
+        ...           50, 51, 52, 51, 50, 52, 53, 54, 53, 52, 54, 55, 56, 55, 54]
+        >>> lows   = [42, 43, 44, 42, 41, 43, 45, 46, 45, 44, 46, 47, 48, 47, 46,
+        ...           48, 49, 50, 49, 48, 50, 51, 52, 51, 50, 52, 53, 54, 53, 52]
+        >>> closes = [43, 44, 45, 43, 42, 44, 46, 47, 46, 45, 47, 48, 49, 48, 47,
+        ...           49, 50, 51, 50, 49, 51, 52, 53, 52, 51, 53, 54, 55, 54, 53]
+        >>> adx = calculateADX(highs, lows, closes, _window=14)
+        >>> print(adx[27])      # first valid value (2 * 14 - 1 = 27)
+        32.4                    # strong trend at that bar
+        >>> print(numpy.isnan(adx[0]))
+        True
     """
     highs = numpy.array(_highs)
     lows = numpy.array(_lows)
@@ -471,15 +521,19 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                                                                           (adds price relative to
                                                                           200-period MA; sets
                                                                           validStartIndex to 200)
+        USE_ADX=True + _highPrices and _lowPrices provided              → _lookback * 9 columns
+                                                                          (adds ADX trend strength;
+                                                                           warmup ~27 bars, covered
+                                                                           by nanWindow=200)
 
     Args:
         _closePrices         (list):           List of close prices. Required.
         _openPrices          (list, optional): List of open prices. Required when
                                                USE_VOLUME_FEATURES is True.
         _highPrices          (list, optional): List of high prices. Required when
-                                               USE_VOLUME_FEATURES is True.
+                                               USE_VOLUME_FEATURES or USE_ADX is True.
         _lowPrices           (list, optional): List of low prices. Required when
-                                               USE_VOLUME_FEATURES is True.
+                                               USE_VOLUME_FEATURES or USE_ADX is True.
         _volumes             (list, optional): List of dollar volumes. Required when
                                                USE_VOLUME_FEATURES is True.
         _orderFlowImbalance  (list, optional): List of OFI values per bar. Required when
@@ -491,7 +545,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     Returns:
         tuple:
             - features (numpy.ndarray): Shape (N, _lookback * F) — each row is a return window. Where F is the
-                                        number of active feature arrays (3–8,
+                                        number of active feature arrays (3–9,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
             - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
@@ -499,7 +553,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
-                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", or "LOOKBACK" keys.
+                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", "USE_ADX", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
@@ -510,7 +564,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Example:
         >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, 
-        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False
+        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False, USE_ADX=False
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
