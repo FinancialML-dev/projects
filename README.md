@@ -134,12 +134,15 @@ Full supervised ML pipeline:
 8. Plot training history (loss + accuracy curves)
 
 ### pricePredictorWithOFI.py — Neural network + LSTM with OFI features
-Extends stockPredictor.py with two model options and OFI-enriched dollar bars as input.
-Adds order flow imbalance as a feature alongside returns, volatility, and RSI.
-
+Extends stockPredictor.py with two model options and OFI-enriched dollar bars as input:
 - `PricePredictor` — feedforward baseline (3-layer MLP)
-- `PricePredictorLSTM` — stacked LSTM (2 layers, hidden=64) + classifier head; processes feature windows as sequences (batch, lookback, features) to capture temporal patterns that the feedforward model cannot
-- `trainModel` — mini-batch training via DataLoader with shuffling, epoch-averaged loss/accuracy, and early stopping on test loss (`patience=15`) with best-weight restore
+- `PricePredictorLSTM` — stacked LSTM (2 layers, hidden=64) + classifier head;
+  processes feature windows as sequences (batch, lookback, features) to capture
+  temporal patterns that the feedforward model cannot
+- `trainModel` — mini-batch training via DataLoader with shuffling, epoch-averaged
+  loss/accuracy, and early stopping on test loss (`patience=15`) with best-weight restore
+- Feature set (9 arrays, all CONFIG-gated): returns, volatility, RSI, MA(20) deviation,
+  intra-bar momentum, bar range, VWAP deviation, OFI, MA(200) long-term context, ADX trend strength
 
 ### main.py — Entry point
 Wires together the pipeline components.
@@ -240,10 +243,12 @@ python main.py
 - **Feedforward (`PricePredictor`):** 3-layer neural network (64→32→1 neurons)
 - **LSTM (`PricePredictorLSTM`):** 2-layer stacked LSTM (hidden=64) + classifier head (32→1)
 - **Training:** Mini-batch gradient descent (batch=32, shuffled) + early stopping (patience=15)
-- **Features:** Returns, volatility, RSI, MA deviation, OFI (up to 7 feature arrays)
+- **Features (up to 9 arrays):** Returns, volatility, RSI, MA(20) deviation, intra-bar momentum,
+  bar range, VWAP deviation, OFI, MA(200) long-term context, ADX trend strength
 - **Task:** Binary classification (next candle"bar" up/down)
 - **Baseline accuracy:** ~51-52% (price features only, feedforward)
-- **With OFI + LSTM:** [Experimental] (sequence + order flow features)
+- **Best result:** ~52.4% mean (LSTM + 200MA + ADX, BTC/USD $25K threshold)
+- **ETH/USD:** ~52.9-53.0% mean (LSTM + 200MA + ADX, $25K threshold)
 - **Evaluation:** Accuracy, precision, recall, F1, confusion matrix
 
 ## Future Improvements - Aspiring to 
