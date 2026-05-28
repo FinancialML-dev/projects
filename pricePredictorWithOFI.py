@@ -12,6 +12,7 @@ import torch                                #uv add torch
 import torch.nn 
 import numpy 
 import matplotlib.pyplot as plotLibrary     #uv add matplotlib 
+import bisect                                
 from datetime import datetime 
 from timebarsWithOFI import fetchCryptoData, formatDataToLists 
 from dollarBarsWithOFI import fetchCryptoData, formatBarsToDictionaryList, createDollarBars, formatDollarBarsToList
@@ -37,7 +38,8 @@ BASE_CONFIG = {
     "USE_ORDER_FLOW_IMBALANCE": True,       #Toggel on/off: Order flow imbalance 
     "MODEL": "lstm",                        #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
     "USE_LONGTERM_CONTEXT": True,           #Price relative to 200-bar Moving Average (MA) (long-term trend context)
-    "USE_ADX": True                         #Trend strength (0-100, >25 = trending)
+    "USE_ADX": True,                        #Trend strength (0-100, >25 = trending)
+    "USE_CROSS_ASSET": False #True          #ETH/BTC ratio relative to its 20-bar MA (only when SYMBOL is ETH/USD)
 }
 
 TIME_BARS_CONFIG = {
@@ -500,7 +502,7 @@ def calculateADX(_highs, _lows, _closes, _window=14):
     return numpy.concatenate([ [numpy.nan], averageDirectionalIndex ])
     
 
-def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _lowPrices=None, _volumes=None, _orderFlowImbalance=None, _lookback=30): 
+def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _lowPrices=None, _volumes=None, _orderFlowImbalance=None, _crossAssetRatio=None, _lookback=30): 
     """
     Builds a sliding-window dataset of return sequences and binary direction labels.
     (Create feature windows and labels for supervised learning.)
@@ -594,6 +596,10 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     if useAverageDirectionalIndex:
         averageDirectionalIndex = calculateADX(_highPrices, _lowPrices, _closePrices, _window=14)
     
+    useCrossAsset = CONFIG.get("USE_CROSS_ASSET", False) and _crossAssetRatio is not None
+    if useCrossAsset:
+        crossAssetRelativeToMovingAverage = calculatePriceRelativeToMA(_crossAssetRatio, _window=20)
+    
     #Align all arrays - RSI is based on prices (length N),
     #returns/volatility are length N-1. Trim RSI to match.
     #Align to returns/priceRelativeToMA length (N-1)
@@ -614,6 +620,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     if useAverageDirectionalIndex:
         averageDirectionalIndex = averageDirectionalIndex[1:]
     
+    if useCrossAsset:
+        crossAssetRelativeToMovingAverage = crossAssetRelativeToMovingAverage[1:]
+    
     #Trim NaN values from the start (first 14 are invalid) — use 20 since MA window is larger than RSI/volatility window
     #validStartIndex = 20 #20 #If we add the MA window set validStartIndex = 20
     #validStartIndex = 20 if CONFIG["USE_PRICE_RELATIVE_TO_MA"] else 14
@@ -626,6 +635,8 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         nanWindow = max(nanWindow, 20)      #VWAP window = 20
     if useLongTermContext:
         nanWindow = max(nanWindow, 200)
+    if useCrossAsset:
+        nanWindow = max(nanWindow, 20) 
     
     validStartIndex = max(nanWindow, CONFIG["LOOKBACK"])
     
@@ -648,6 +659,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     
     if useAverageDirectionalIndex:
         averageDirectionalIndex = averageDirectionalIndex[validStartIndex:]
+    
+    if useCrossAsset:
+        crossAssetRelativeToMovingAverage = crossAssetRelativeToMovingAverage[validStartIndex:]
     
     features = []
     labels = []
@@ -691,6 +705,9 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
             
         if useAverageDirectionalIndex: 
             featureParts.append(averageDirectionalIndex[i - _lookback:i])
+            
+        if useCrossAsset:
+            featureParts.append(crossAssetRelativeToMovingAverage[i - _lookback:i])
         
         window = numpy.concatenate(featureParts)
         
@@ -1228,6 +1245,12 @@ def main():
         CONFIG["END_DATE"]
     )
     
+    #Fetch BTC reference bars for cross-asset feature 
+    btcTimeBars = None 
+    if CONFIG.get("USE_CROSS_ASSET", False) and CONFIG["SYMBOL"] != "BTC/USD":
+        btcBars = fetchCryptoData("BTC/USD", CONFIG["TIMEFRAME"], CONFIG["START_DATE"], CONFIG["END_DATE"])
+        btcTimeBars = formatBarsToDictionaryList(btcBars, "BTC/USD")
+    
     for threshold in [25_000]: #[25_000, 10_000]: #[500_000, 100_000, 50_000, 25_000, 10_000]:
         CONFIG["DOLLAR_THRESHOLD"] = threshold
         print(f"\n DOLLAR_THRESHOLD: {threshold}\n")
@@ -1239,6 +1262,15 @@ def main():
             barStart, time, openPrice, highPrice, lowPrice, closePrice, dollarVolume, orderFlowImbalanceList = formatDollarBarsToList(dollarBars)
             if CONFIG["USE_ORDER_FLOW_IMBALANCE"]: 
                 orderFlowImbalance = numpy.array(orderFlowImbalanceList)
+            crossAssetRatio = None
+            if btcTimeBars is not None:
+                btcTimestamps = [item["time"] for item in btcTimeBars]
+                btcCloses     = [item["close"] for item in btcTimeBars]
+                crossAssetRatio = []
+                for i in range(len(closePrice)):
+                    index = bisect.bisect_right(btcTimestamps, barStart[i]) - 1
+                    btcPrice = btcCloses[max(0, index)]
+                    crossAssetRatio.append(closePrice[i]/btcPrice)
         else:   #CONFIG["BAR_MODE"] == "time_bars" 
             time, openPrice, highPrice, lowPrice, closePrice, volume = formatDataToLists(bars, CONFIG["SYMBOL"]) #Version 1
             
@@ -1254,6 +1286,7 @@ def main():
                                            _lowPrices=lowPrice,
                                            _volumes=dollarVolume,
                                            _orderFlowImbalance=orderFlowImbalance, 
+                                           _crossAssetRatio=crossAssetRatio,
                                            _lookback=CONFIG["LOOKBACK"]
                                            )
             print(f"--> Features shape: {X.shape}")
