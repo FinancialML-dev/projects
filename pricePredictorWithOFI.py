@@ -527,6 +527,11 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                                                                           (adds ADX trend strength;
                                                                            warmup ~27 bars, covered
                                                                            by nanWindow=200)
+        USE_CROSS_ASSET=True + _crossAssetRatio provided                → _lookback * 10 columns
+                                                                          (adds ETH/BTC ratio relative
+                                                                           to its 20-bar MA; only
+                                                                           meaningful when SYMBOL
+                                                                           is ETH/USD)
 
     Args:
         _closePrices         (list):           List of close prices. Required.
@@ -541,13 +546,17 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         _orderFlowImbalance  (list, optional): List of OFI values per bar. Required when
                                                USE_ORDER_FLOW_IMBALANCE is True.
                                                OFI = (close - open) / (high - low).
+        _crossAssetRatio     (list, optional): List of ETH/BTC price ratios aligned to
+                                               each bar. Required when USE_CROSS_ASSET is True.
+                                               Computed as closePrice[i] / btcClose[i] in the
+                                               main pipeline via bisect timestamp alignment.
         _lookback            (int, optional):  Number of past returns per feature window.
                                                Defaults to 30.
 
     Returns:
         tuple:
             - features (numpy.ndarray): Shape (N, _lookback * F) — each row is a return window. Where F is the
-                                        number of active feature arrays (3–9,
+                                        number of active feature arrays (3–10,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
             - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
@@ -555,7 +564,8 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
-                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", "USE_ADX", or "LOOKBACK" keys.
+                    "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", "USE_ADX", 
+                    "USE_CROSS_ASSET", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
@@ -566,7 +576,8 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
 
     Example:
         >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, 
-        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False, USE_ADX=False
+        >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False, 
+        >>> #      USE_ADX=False, USE_CROSS_ASSET=False
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
