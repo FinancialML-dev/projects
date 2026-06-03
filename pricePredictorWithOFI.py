@@ -510,6 +510,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
     
     For each position i, the feature is a window of the previous `_lookback` returns,
     and the label is 1 if the next return is positive (price up), 0 if negative (price down).
+    N is controlled by CONFIG["PREDICTION_HOLD_BARS"] — N=1 is single next-bar direction, N>1 predicts the direction of a multi-bar hold.
     (For each time step t, features are returns from t-lookback to t-1.
     Label is whether price went up at time t --> (1) or down (0).)
 
@@ -560,13 +561,15 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
                                         number of active feature arrays (3–10,
                                         controlled by CONFIG flags). Each row is
                                         one concatenated multi-feature window.
-            - labels   (numpy.ndarray): Shape (N,) — 1 if next return > 0 (up),
-                                        0 if next return <= 0 (down).
+            - labels   (numpy.ndarray): Shape (N,) — 1 if N-bar cumulative return (next return) > 0 (up),
+                                        0 if N-bar cumulative return (next return) <= 0 (down).
+                                        Note: final _lookback + (PREDICTION_HOLD_BARS - 1)
+                                        bars are dropped — not enough future bars to label.
 
     Raises:
         KeyError:   If CONFIG is missing "USE_VOLUME_FEATURES", "USE_PRICE_RELATIVE_TO_MA",
                     "USE_ORDER_FLOW_IMBALANCE", "USE_LONGTERM_CONTEXT", "USE_ADX", 
-                    "USE_CROSS_ASSET", or "LOOKBACK" keys.
+                    "USE_CROSS_ASSET", "PREDICTION_HOLD_BARS", or "LOOKBACK" keys.
         TypeError:  If USE_VOLUME_FEATURES is True but _openPrices, _highPrices,
                     _lowPrices, or _volumes is None (passed to sub-calculators
                     that expect arrays).
@@ -579,6 +582,7 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         >>> # With CONFIG["USE_PRICE_RELATIVE_TO_MA"]=False, USE_VOLUME_FEATURES=False, 
         >>> #      USE_ORDER_FLOW_IMBALANCE=False, USE_LONGTERM_CONTEXT=False, 
         >>> #      USE_ADX=False, USE_CROSS_ASSET=False
+        >>> # With all CONFIG flags False and PREDICTION_HOLD_BARS=1 (single next-bar label)
         >>> prices = [100, 102, 101, 105, 103, 107, 109, 108, 111, 110,
         ...           112, 115, 113, 116, 118]   # 15 prices, validStartIndex=14
         >>> features, labels = createFeaturesAndLabels(prices, _lookback=30)
@@ -1245,20 +1249,81 @@ def plotTrainingHistory(_history):
 
 def backtest(_model, _XtestData, _testBarReturns, _fee=0.0015, _threshold=0.5): 
     """
-    ...
+    Simulate trades on the test set and compute financial performance metrics.
+
+    For each test bar, runs the model in eval mode to produce a UP probability.
+    If the probability exceeds _threshold, the strategy enters a long position
+    and holds for PREDICTION_HOLD_BARS bars, collecting bar returns minus a
+    round-trip fee on entry. If the model predicts DOWN, the position is flat
+    (0% return that bar). After the hold period the loop advances and re-evaluates.
+
+    Fee is deducted only once per new entry (2 * _fee on the first bar of each
+    trade). Consecutive UP predictions within an active hold period do not incur
+    an additional fee — the position is already open.
+
+    Args:
+        _model          (torch.nn.Module): Trained model in any state — set to eval()
+                                           internally before inference.
+        _XtestData      (numpy.ndarray):   Test features of shape (N, _lookback * F).
+                                           Converted to FloatTensor internally.
+        _testBarReturns (list or numpy.ndarray): Per-bar returns for the test period,
+                                                 used to compute P&L during held positions
+                                                 and the buy-and-hold benchmark.
+        _fee            (float, optional): One-way transaction fee as a decimal
+                                           (e.g., 0.0015 = 0.15%). Applied as 2 * _fee
+                                           on entry bar. Defaults to 0.0015.
+        _threshold      (float, optional): Probability cutoff for a UP prediction.
+                                           Higher values = fewer, higher-confidence trades.
+                                           Defaults to 0.5.
+
+    Returns:
+        dict with the following keys:
+            - "cumulativeStrategy" (numpy.ndarray): Equity curve of the strategy (starts at 1.0).
+            - "cumulativeBuyHold"  (numpy.ndarray): Equity curve of buy-and-hold (starts at 1.0).
+            - "strategyReturns"    (numpy.ndarray): Per-bar return series after fees.
+            - "sharpe"             (float):         Annualized Sharpe ratio — assumes
+                                                    ~47,000 dollar bars per year
+                                                    (ETH/USD at $25K threshold, 2023–2026).
+                                                    Returns 0.0 if return std is zero.
+            - "maxDrawdown"        (float):         Worst peak-to-trough loss as a negative
+                                                    decimal (e.g., -0.12 = -12%).
+            - "totalReturn"        (float):         Strategy total return as a decimal
+                                                    (e.g., 0.08 = +8%).
+            - "numberTrades"       (int):           Number of new entries (fee-incurring trades).
+
+    Raises:
+        RuntimeError: If _XtestData feature dimension does not match the model's
+                    expected input size — PyTorch will raise on the forward pass.
+        ValueError:   If _testBarReturns and _XtestData have different lengths —
+                    strategyReturns is sized to len(predictions) but barReturns
+                    is indexed up to endBar, causing an out-of-bounds access.
+
+    Example:
+        >>> results = backtest(model, XtestData, testBarReturns, _fee=0.0015, _threshold=0.5)
+        >>> printBacktestResults(results)
+        xxxxxxxxxxxxxxxxxxxx
+        Backtest result
+        xxxxxxxxxxxxxxxxxxxx
+        Total return (strategy):    8.24%
+        Total return (buy & hold):  21.30%
+        Sharp ratio:                1.243
+        Max drawdown:               -14.50%
+        Number of trades:           3821
+        xxxxxxxxxxxxxxxxxxxx
+        >>> # Threshold sweep — compare net vs gross returns
+        >>> for thresh in [0.50, 0.55, 0.60]:
+        ...     net = backtest(model, XtestData, testBarReturns, _fee=0.0015, _threshold=thresh)
+        ...     gross = backtest(model, XtestData, testBarReturns, _fee=0.0, _threshold=thresh)
+        ...     print(f"{thresh:.2f}  net={net['totalReturn']:.2%}  gross={gross['totalReturn']:.2%}")
+        0.50  net=8.24%   gross=13.81%
+        0.55  net=6.12%   gross=9.43%
+        0.60  net=3.87%   gross=5.92%
     """
     _model.eval()
     with torch.no_grad():
         probs = _model(torch.tensor(_XtestData, dtype=torch.float32)).squeeze().numpy()
         
     predictions = (probs > _threshold).astype(int)
-    #---
-    '''raw = (probs > _threshold).astype(int)
-    predictions = numpy.zeros_like(raw)
-    for i in range(1, len(raw)):
-        if raw[i] == 1 and raw[i-1] == 1:    #Two consecutive up predictions
-            predictions[i] = 1'''
-    #---
     barReturns = numpy.array(_testBarReturns)
     strategyReturns = numpy.zeros(len(predictions))
     previousPosition = 0
@@ -1274,22 +1339,12 @@ def backtest(_model, _XtestData, _testBarReturns, _fee=0.0015, _threshold=0.5):
                 numberTrades += 1
             for j in range(i, endBar):
                 strategyReturns[j] = barReturns[j] - (2*_fee if j == i and entering else 0.0)
-            #heldReturn = numpy.prod(1 + barReturns[i:endBar]) - 1
-            #strategyReturns[i] = heldReturn - (2*_fee)
-            #numberTrades += 1
             previousPosition = 1
             i = endBar      #Jump past the hold period 
         else:
             strategyReturns[i] = 0.0 
             previousPosition = 0
             i += 1
-    '''for i in range(len(predictions)): 
-        position = predictions[i]
-        entering = (position == 1 and previousPosition == 0)
-        if entering:
-            numberTrades += 1
-        strategyReturns[i] = (barReturns[i] if position == 1 else 0.0) - (2*_fee if entering else 0.0) 
-        previousPosition = position'''
         
     cumulativeStrategy = numpy.cumprod(1 + strategyReturns)
     cumulativeBuyHold = numpy.cumprod(1 + barReturns)
