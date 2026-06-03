@@ -39,7 +39,8 @@ BASE_CONFIG = {
     "MODEL": "lstm",                        #"lstm" - Long Short Term Memory (LSTM) or "feedforward"
     "USE_LONGTERM_CONTEXT": True,           #Price relative to 200-bar Moving Average (MA) (long-term trend context)
     "USE_ADX": True,                        #Trend strength (0-100, >25 = trending)
-    "USE_CROSS_ASSET": False #True          #ETH/BTC ratio relative to its 20-bar MA (only when SYMBOL is ETH/USD)
+    "USE_CROSS_ASSET": False, #True         #ETH/BTC ratio relative to its 20-bar MA (only when SYMBOL is ETH/USD)
+    "PREDICTION_HOLD_BARS": 1 #5           #N-bar cumulative return for labels and hold period
 }
 
 TIME_BARS_CONFIG = {
@@ -722,13 +723,19 @@ def createFeaturesAndLabels(_closePrices, _openPrices=None, _highPrices=None, _l
         
         window = numpy.concatenate(featureParts)
         
-        features.append(window) 
+        #features.append(window) 
         
         #Label: 1 if next return positive, 0 if negative 
-        nextReturn = returns[i] 
-        labels.append(1 if nextReturn > 0 else 0) 
+        #nextReturn = returns[i] 
+        #labels.append(1 if nextReturn > 0 else 0) 
+        #Predict next N bars cumulative retun 
+        N = CONFIG["PREDICTION_HOLD_BARS"] #or 10 
+        if i + N <= len(returns):
+            numberOfBarReturn = numpy.prod(1 + returns[i:i+N]) - 1
+            labels.append(1 if numberOfBarReturn > 0 else 0) 
+            features.append(window) 
     
-    return numpy.array(features), numpy.array(labels)
+    return numpy.array(features), numpy.array(labels), returns 
 
 def trainTestSplit(_X, _y, _trainRatio=0.8): 
     """
@@ -1236,6 +1243,113 @@ def plotTrainingHistory(_history):
     plotLibrary.show()
 
 
+def backtest(_model, _XtestData, _testBarReturns, _fee=0.0015, _threshold=0.5): 
+    """
+    ...
+    """
+    _model.eval()
+    with torch.no_grad():
+        probs = _model(torch.tensor(_XtestData, dtype=torch.float32)).squeeze().numpy()
+        
+    predictions = (probs > _threshold).astype(int)
+    #---
+    '''raw = (probs > _threshold).astype(int)
+    predictions = numpy.zeros_like(raw)
+    for i in range(1, len(raw)):
+        if raw[i] == 1 and raw[i-1] == 1:    #Two consecutive up predictions
+            predictions[i] = 1'''
+    #---
+    barReturns = numpy.array(_testBarReturns)
+    strategyReturns = numpy.zeros(len(predictions))
+    previousPosition = 0
+    numberTrades = 0
+    
+    i = 0
+    while i < len(predictions):
+        if predictions[i] == 1: 
+            #Hold N bars 
+            endBar = min(i + CONFIG["PREDICTION_HOLD_BARS"], len(barReturns))
+            entering = (previousPosition == 0)
+            if entering: 
+                numberTrades += 1
+            for j in range(i, endBar):
+                strategyReturns[j] = barReturns[j] - (2*_fee if j == i and entering else 0.0)
+            #heldReturn = numpy.prod(1 + barReturns[i:endBar]) - 1
+            #strategyReturns[i] = heldReturn - (2*_fee)
+            #numberTrades += 1
+            previousPosition = 1
+            i = endBar      #Jump past the hold period 
+        else:
+            strategyReturns[i] = 0.0 
+            previousPosition = 0
+            i += 1
+    '''for i in range(len(predictions)): 
+        position = predictions[i]
+        entering = (position == 1 and previousPosition == 0)
+        if entering:
+            numberTrades += 1
+        strategyReturns[i] = (barReturns[i] if position == 1 else 0.0) - (2*_fee if entering else 0.0) 
+        previousPosition = position'''
+        
+    cumulativeStrategy = numpy.cumprod(1 + strategyReturns)
+    cumulativeBuyHold = numpy.cumprod(1 + barReturns)
+    
+    #Annualized Sharp: ~47K dollar bars/year at $25K threshold (ETH/USD, 2023-2026)
+    barsPerYear = 47_000
+    sharpe = (
+        numpy.mean(strategyReturns)/numpy.std(strategyReturns)*numpy.sqrt(barsPerYear)
+        if numpy.std(strategyReturns) > 0 else 0.0 
+    )
+    
+    peak = numpy.maximum.accumulate(cumulativeStrategy)
+    maxDrawdown = float( ( (cumulativeStrategy - peak) / peak).min() )
+    
+    return {
+        "cumulativeStrategy": cumulativeStrategy,
+        "cumulativeBuyHold": cumulativeBuyHold,
+        "strategyReturns": strategyReturns,
+        "sharpe": sharpe,
+        "maxDrawdown": maxDrawdown,
+        "totalReturn": float(cumulativeStrategy[-1] - 1.0),
+        "numberTrades": numberTrades
+    }
+    
+
+def printBacktestResults(_results):
+    """
+    Print backtset summary: return, Sharp, drawdown, trade count vd buy-and-hold.
+    """
+    buyAndHoldReturn = float(_results["cumulativeBuyHold"][-1] - 1.0)
+    print("\n" + "x"*20)
+    print("Backtest result")
+    print("x"*20)
+    print(f"Total return (strategy):    {_results["totalReturn"]:.2%}")
+    print(f"Total return (buy & hold):  {buyAndHoldReturn:.2%}")
+    print(f"Sharp ratio:                {_results["sharpe"]:.3f}")
+    print(f"Max drawdown:               {_results["maxDrawdown"]:.2%}")
+    print(f"Number of trades:           {_results["numberTrades"]}")
+    print("x"*20 + "\n")
+    
+
+def plotBacktest(_results):
+    """
+    Plots strategy equity curve vs buy-and-hold. Saves to Backtest.png.
+    """
+    figure, axis = plotLibrary.subplots(1, 1, figsize=(12, 5))
+    axis.plot(_results["cumulativeStrategy"], label="Strategy", color="steelblue")
+    axis.plot(_results["cumulativeBuyHold"], label="Buy & Hold ETH", color="darkorange")
+    axis.axhline(y=1.0, color="red", linestyle="--", alpha=0.5, label="Break-even")
+    axis.set_title("Backtest: Strategy vs Buy & Hold ETH")
+    axis.set_xlabel("Test bar (dollar bar index)")
+    axis.set_ylabel("Equity (1.0 = starting capital)")
+    axis.legend()
+    axis.grid(True, alpha=0.3)
+    plotLibrary.tight_layout()
+    plotLibrary.savefig("Backtest.png", dpi=150, bbox_inches="tight")
+    print("--> Backtest plot saved to Backtest.png")
+    plotLibrary.show()
+    
+
 #-------------------------------
 #Main Execution 
 #-------------------------------    
@@ -1291,7 +1405,7 @@ def main():
                 
             #2. Feature engineering 
             print("\nStep 2: Creating features...")
-            X, y = createFeaturesAndLabels(closePrice, 
+            X, y, trimmedReturns = createFeaturesAndLabels(closePrice, 
                                            _openPrices=openPrice,
                                            _highPrices=highPrice,
                                            _lowPrices=lowPrice,
@@ -1309,6 +1423,10 @@ def main():
             XtrainData, XtestData, yTrainData, yTestData = trainTestSplit(
                 X, y, _trainRatio=CONFIG["TRAIN_SPLIT"] 
             )
+            
+            splitIndex = int(CONFIG["TRAIN_SPLIT"] * len(X))
+            testBarReturns = trimmedReturns[splitIndex + CONFIG["LOOKBACK"]:]
+            
             #Clip extreme outlier values (volume ratio can spike 50x+ during news events)
             #X = numpy.clip(X, -10, 10)
             scaler = StandardScaler()                           #Normalize the features 
@@ -1371,6 +1489,16 @@ def main():
         #print(f"\nMean: {numpy.mean(results):.4f} ± {numpy.std(results):.4f}")
         print(f"\nThreshold ${threshold:,.0f}:\n"
               f"    Mean: {numpy.mean(results):.4f} ± {numpy.std(results):.4f}")
+        
+        backtestResults = backtest(model, XtestData, testBarReturns)
+        printBacktestResults(backtestResults)
+        plotBacktest(backtestResults)
+        print("\nThreshold sweep (net vs gross):")
+        print(f"{"Threshold":>10} {"Trades":>7} {"Net return":>12} {"Gross return":>13}")
+        for thresh in [0.50, 0.52, 0.55, 0.58, 0.60, 0.65]:
+            net = backtest(model, XtestData, testBarReturns, _fee=0.0015, _threshold=thresh)
+            gross = backtest(model, XtestData, testBarReturns, _fee=0.0, _threshold=thresh)
+            print(f"{thresh:>10.2f} {net["numberTrades"]:>7} {net["totalReturn"]:>12.2%} {gross["totalReturn"]:>13.2%}")
         
     #7. Visualize 
     print("\nStep 7: Generating plots...")
